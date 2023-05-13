@@ -27,7 +27,7 @@ impl Value {
         if let Value::Closure(c) = self {
             return c;
         }
-        panic!("Not i32.")
+        panic!("Not a closure.")
     }
 }
 
