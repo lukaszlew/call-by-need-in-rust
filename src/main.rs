@@ -131,82 +131,90 @@ fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
 // We don't have helpers for for "lambda" and "var" constructs in the lambda calculus, because,
 // we use Rust syntax for that. This is so-called to Higher-Order-Abstract-Syntax (HOAS) techique.
 
-// Since most our examples or tests should evaluate to int, this helper reduces the verboseness as well.
-fn force_expect_i32(ptr: &HeapPtr) -> i32 {
-    ptr.force();
-    ptr.value().unwrap().i32().unwrap()
-}
+// This module has examples of usage of the machinery above.
+#[cfg(test)]
+mod test {
+    use crate::ap;
+    use crate::i32;
+    use crate::lambda;
+    use crate::HeapPtr;
 
-// Simplest application.
-#[test]
-fn identity_applied() {
-    // (\x -> x) 5
-    let t = ap(&lambda(|x| x), &i32(5));
-    // assert_eq!(t.get(), 5);
-    assert_eq!(force_expect_i32(&t), 5);
-}
-
-// Currying on Rust HOAS.
-#[test]
-fn fst_and_snd() {
-    // fst = \x.\y.x
-    let fst = lambda(move |x| lambda(move |y| x.clone()));
-    // snd = \x.\y.y
-    let snd = lambda(move |x| lambda(move |y| y.clone()));
-    // we need to clone 'x' because inner lambda might be called multiple times.
-
-    // fst 5 6 == 5
-    assert_eq!(force_expect_i32(&ap(&ap(&fst, &i32(5)), &i32(6))), 5);
-    // snd 5 6 == 6
-    assert_eq!(force_expect_i32(&ap(&ap(&snd, &i32(5)), &i32(6))), 6);
-}
-
-// Verify laziness and call-by-need's memoization.
-#[test]
-fn verify_call_by_need() {
-    static mut CALL_COUNT: i32 = 0;
-    fn get_call_count() -> i32 {
-        // safety: single-threaded.
-        unsafe {
-            return CALL_COUNT;
-        }
+    // Since most our examples or tests should evaluate to int, this helper reduces the verboseness as well.
+    fn force_expect_i32(ptr: &HeapPtr) -> i32 {
+        ptr.force();
+        ptr.value().unwrap().i32().unwrap()
     }
-    // We define here what in Haskell could be a "build-in" "+1" function.
-    // inc = \n.n + 1
-    let inc = lambda(|x| {
-        // Tracking call count for test needs.
-        // safety: single-threaded.
-        unsafe {
-            CALL_COUNT += 1;
+
+    // Simplest application.
+    #[test]
+    fn identity_applied() {
+        // (\x -> x) 5
+        let t = ap(&lambda(|x| x), &i32(5));
+        // assert_eq!(t.get(), 5);
+        assert_eq!(force_expect_i32(&t), 5);
+    }
+
+    // Currying on Rust HOAS.
+    #[test]
+    fn fst_and_snd() {
+        // fst = \x.\y.x
+        let fst = lambda(move |x| lambda(move |y| x.clone()));
+        // snd = \x.\y.y
+        let snd = lambda(move |x| lambda(move |y| y.clone()));
+        // we need to clone 'x' because inner lambda might be called multiple times.
+
+        // fst 5 6 == 5
+        assert_eq!(force_expect_i32(&ap(&ap(&fst, &i32(5)), &i32(6))), 5);
+        // snd 5 6 == 6
+        assert_eq!(force_expect_i32(&ap(&ap(&snd, &i32(5)), &i32(6))), 6);
+    }
+
+    // Verify laziness and call-by-need's memoization.
+    #[test]
+    fn verify_call_by_need() {
+        static mut CALL_COUNT: i32 = 0;
+        fn get_call_count() -> i32 {
+            // safety: single-threaded.
+            unsafe {
+                return CALL_COUNT;
+            }
         }
-        // We are lazy, so there is no guarantee that x is a value. Need to force first.
-        i32(force_expect_i32(&x) + 1)
-    });
+        // We define here what in Haskell could be a "build-in" "+1" function.
+        // inc = \n.n + 1
+        let inc = lambda(|x| {
+            // Tracking call count for test needs.
+            // safety: single-threaded.
+            unsafe {
+                CALL_COUNT += 1;
+            }
+            // We are lazy, so there is no guarantee that x is a value. Need to force first.
+            i32(force_expect_i32(&x) + 1)
+        });
 
-    // inc_twice = \n.inc (inc x)
-    let inc_twice = lambda(move |n| ap(&inc, &ap(&inc, &n)));
-    // hopefully_12 = inc_twice 10
-    let hopefully_12 = &ap(&inc_twice, &i32(10));
+        // inc_twice = \n.inc (inc x)
+        let inc_twice = lambda(move |n| ap(&inc, &ap(&inc, &n)));
+        // hopefully_12 = inc_twice 10
+        let hopefully_12 = &ap(&inc_twice, &i32(10));
 
-    assert_eq!(get_call_count(), 0);
-    assert_eq!(force_expect_i32(&hopefully_12), 12);
-    assert_eq!(get_call_count(), 2);
-    assert_eq!(force_expect_i32(&hopefully_12), 12);
-    assert_eq!(get_call_count(), 2);
-    // Indeed nothing happens on second call of force.
+        assert_eq!(get_call_count(), 0);
+        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(get_call_count(), 2);
+        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(get_call_count(), 2);
+        // Indeed nothing happens on second call of force.
+    }
+
+    #[test]
+    fn deep_curring_is_awkward() {
+        // f = \a.\b.\c.a
+        let f = lambda(move |a| {
+            lambda(move |b| {
+                let a = a.clone(); // This is needed.
+                lambda(move |c| a.clone())
+            })
+        });
+    }
 }
-
-#[test]
-fn deep_curring_is_awkward() {
-    // f = \a.\b.\c.a
-    let f = lambda(move |a| {
-        lambda(move |b| {
-            let a = a.clone(); // This is needed.
-            lambda(move |c| a.clone())
-        })
-    });
-}
-
 // So what did we learn?
 // - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
 // - The code of Rust lambdas that are passed to `lambda` are compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
@@ -217,7 +225,9 @@ fn deep_curring_is_awkward() {
 
 fn main() {
     // Silence 'dead code warnings'.
-    force_expect_i32(&ap(&lambda(|x| x), &i32(5)));
+    let t = ap(&lambda(|x| x), &i32(5));
+    t.force();
+    let _i = t.value().unwrap().i32().unwrap();
 }
 
 // What could we do next?
