@@ -16,18 +16,18 @@ enum Value {
 
 // This are just some accesseors that make the code less messy.
 impl Value {
-    fn expect_i32(self: Value) -> i32 {
+    fn i32(self: Value) -> Option<i32> {
         if let Value::I32(i) = self {
-            return i;
+            return Some(i);
         }
-        panic!("Not i32.")
+        None
     }
 
-    fn expect_closure(self: Value) -> Closure {
+    fn closure(self: Value) -> Option<Closure> {
         if let Value::Closure(c) = self {
-            return c;
+            return Some(c);
         }
-        panic!("Not a closure.")
+        None
     }
 }
 
@@ -62,20 +62,22 @@ impl HeapPtr {
     }
 
     // Another helper.
-    fn expect_value(&self) -> Value {
+    fn value(&self) -> Option<Value> {
         match self.get() {
-            HeapObj::Value(v) => v.clone(),
-            _ => panic!("Not a value."),
+            HeapObj::Value(v) => Some(v.clone()),
+            _ => None,
         }
     }
 
     // Acessing the HeapObj self is pointing to. It is safe because we return cloned Rc.
     fn get(&self) -> HeapObj {
+        // safety: The unsafe pointer is just temporary, we clone immediately.
         unsafe { (*self.rc.as_ref().get()).clone() }
     }
 
     // set encapsulate the unsafeness of the accessing and mutation of the HeapObj inside of the UnsafeCell.
     fn set(&self, obj: HeapObj) {
+        // safety: The unsafe pointer is just temporary, no HeapPtr::get is called in parallel, so this is the only unsafe pointer.
         unsafe {
             *self.rc.as_ref().get() = obj;
         }
@@ -94,7 +96,7 @@ impl HeapPtr {
             t1.force();
             // t2.force();
             // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-            let closure: Closure = t1.expect_value().expect_closure();
+            let closure: Closure = t1.value().unwrap().closure().unwrap();
             let new_ptr: HeapPtr = closure(t2.clone());
             new_ptr.force();
             self.set(new_ptr.get());
@@ -132,7 +134,7 @@ fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
 // Since most our examples or tests should evaluate to int, this helper reduces the verboseness as well.
 fn force_expect_i32(ptr: &HeapPtr) -> i32 {
     ptr.force();
-    ptr.expect_value().expect_i32()
+    ptr.value().unwrap().i32().unwrap()
 }
 
 // Simplest application.
@@ -162,13 +164,20 @@ fn fst_and_snd() {
 // Verify laziness and call-by-need's memoization.
 #[test]
 fn verify_call_by_need() {
-    static mut INC_CALL_COUNT: i32 = 0;
+    static mut CALL_COUNT: i32 = 0;
+    fn get_call_count() -> i32 {
+        // safety: single-threaded.
+        unsafe {
+            return CALL_COUNT;
+        }
+    }
     // We define here what in Haskell could be a "build-in" "+1" function.
     // inc = \n.n + 1
     let inc = lambda(|x| {
         // Tracking call count for test needs.
+        // safety: single-threaded.
         unsafe {
-            INC_CALL_COUNT += 1;
+            CALL_COUNT += 1;
         }
         // We are lazy, so there is no guarantee that x is a value. Need to force first.
         i32(force_expect_i32(&x) + 1)
@@ -179,11 +188,11 @@ fn verify_call_by_need() {
     // hopefully_12 = inc_twice 10
     let hopefully_12 = &ap(&inc_twice, &i32(10));
 
-    unsafe { assert_eq!(INC_CALL_COUNT, 0) };
+    assert_eq!(get_call_count(), 0);
     assert_eq!(force_expect_i32(&hopefully_12), 12);
-    unsafe { assert_eq!(INC_CALL_COUNT, 2) };
+    assert_eq!(get_call_count(), 2);
     assert_eq!(force_expect_i32(&hopefully_12), 12);
-    unsafe { assert_eq!(INC_CALL_COUNT, 2) };
+    assert_eq!(get_call_count(), 2);
     // Indeed nothing happens on second call of force.
 }
 
