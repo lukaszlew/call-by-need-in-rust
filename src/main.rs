@@ -72,14 +72,14 @@ impl HeapPtr {
     // Acessing the HeapObj self is pointing to. It is safe because we return cloned Rc.
     fn get(&self) -> HeapObj {
         // safety: The unsafe pointer is just temporary, we clone immediately.
-        unsafe { (*self.rc.as_ref().get()).clone() }
+        unsafe { (*self.rc.get()).clone() }
     }
 
     // set encapsulate the unsafeness of the accessing and mutation of the HeapObj inside of the UnsafeCell.
     fn set(&self, obj: HeapObj) {
         // safety: The unsafe pointer is just temporary, no HeapPtr::get is called in parallel, so this is the only unsafe pointer.
         unsafe {
-            *self.rc.as_ref().get() = obj;
+            *self.rc.get() = obj;
         }
     }
 
