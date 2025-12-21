@@ -1,4 +1,3 @@
-#![allow(unused_variables)]
 // Reference counting is our GC replacement.
 use std::rc::Rc;
 
@@ -133,6 +132,43 @@ pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
 #[cfg(test)]
 mod test {
     use crate::{ap, force_expect_i32, i32, lambda, HeapPtr};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// Shared counter for tracking function calls in tests.
+    type Counter = Rc<Cell<i32>>;
+
+    fn counter() -> Counter {
+        Rc::new(Cell::new(0))
+    }
+
+    /// Create an increment function that counts how many times it's called.
+    fn counted_inc(c: &Counter) -> HeapPtr {
+        let c = c.clone();
+        lambda(move |x| {
+            c.set(c.get() + 1);
+            i32(force_expect_i32(&x) + 1)
+        })
+    }
+
+    /// Create a thunk that returns `val` and increments counter when forced.
+    fn counted_const(c: &Counter, val: i32) -> HeapPtr {
+        let c = c.clone();
+        lambda(move |_| {
+            c.set(c.get() + 1);
+            i32(val)
+        })
+    }
+
+    /// add = \a.\b. a + b
+    fn add() -> HeapPtr {
+        lambda(|a| {
+            lambda(move |b| {
+                let a = a.clone();
+                i32(force_expect_i32(&a) + force_expect_i32(&b))
+            })
+        })
+    }
 
     // -------------------------------------------------------------------------
     // Basic application: (\x -> x) 5 = 5
@@ -163,12 +199,8 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn unused_argument_not_evaluated() {
-        static mut CALL_COUNT: i32 = 0;
-
-        let expensive = lambda(|_| {
-            unsafe { CALL_COUNT += 1; }
-            i32(999)
-        });
+        let c = counter();
+        let expensive = counted_const(&c, 999);
 
         // const = \x.\y. x (ignores second argument)
         let const_fn = lambda(|x| lambda(move |_y| x.clone()));
@@ -177,7 +209,7 @@ mod test {
         let result = ap(ap(const_fn, i32(42)), unused_thunk);
 
         assert_eq!(force_expect_i32(&result), 42);
-        assert_eq!(unsafe { CALL_COUNT }, 0); // expensive was never called!
+        assert_eq!(c.get(), 0); // expensive was never called!
     }
 
     // -------------------------------------------------------------------------
@@ -186,26 +218,18 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn verify_call_by_need() {
-        static mut CALL_COUNT: i32 = 0;
-        fn get_call_count() -> i32 {
-            unsafe { CALL_COUNT }
-        }
-
-        // inc = \n. n + 1
-        let inc = lambda(|x| {
-            unsafe { CALL_COUNT += 1; }
-            i32(force_expect_i32(&x) + 1)
-        });
+        let c = counter();
+        let inc = counted_inc(&c);
 
         // inc_twice = \n. inc (inc n)
         let inc_twice = lambda(move |n| ap(inc.clone(), ap(inc.clone(), n)));
         let hopefully_12 = ap(inc_twice, i32(10));
 
-        assert_eq!(get_call_count(), 0);
+        assert_eq!(c.get(), 0);
         assert_eq!(force_expect_i32(&hopefully_12), 12);
-        assert_eq!(get_call_count(), 2);
+        assert_eq!(c.get(), 2);
         assert_eq!(force_expect_i32(&hopefully_12), 12);
-        assert_eq!(get_call_count(), 2); // Still 2! Memoization works.
+        assert_eq!(c.get(), 2); // Still 2! Memoization works.
     }
 
     // -------------------------------------------------------------------------
@@ -214,29 +238,16 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn shared_thunk_evaluated_once() {
-        static mut CALL_COUNT: i32 = 0;
-
-        let expensive = lambda(|_| {
-            unsafe { CALL_COUNT += 1; }
-            i32(1)
-        });
-
+        let c = counter();
+        let expensive = counted_const(&c, 1);
         let thunk = ap(expensive, i32(0));
 
-        // add = \a.\b. a + b
-        let add = lambda(|a| {
-            lambda(move |b| {
-                let a = a.clone();
-                i32(force_expect_i32(&a) + force_expect_i32(&b))
-            })
-        });
-
         // Use thunk twice: add thunk thunk
-        let result = ap(ap(add, thunk.clone()), thunk);
+        let result = ap(ap(add(), thunk.clone()), thunk);
 
-        assert_eq!(unsafe { CALL_COUNT }, 0);
+        assert_eq!(c.get(), 0);
         assert_eq!(force_expect_i32(&result), 2);
-        assert_eq!(unsafe { CALL_COUNT }, 1); // Called once, not twice!
+        assert_eq!(c.get(), 1); // Called once, not twice!
     }
 
     // -------------------------------------------------------------------------
