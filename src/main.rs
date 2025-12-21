@@ -2,8 +2,8 @@
 // Reference counting is our GC replacement.
 use std::rc::Rc;
 
-// We use UnsafeCell to mutate heap objects in-place when forcing lambda evaluation.
-use std::cell::UnsafeCell;
+// We use RefCell to mutate heap objects in-place when forcing lambda evaluation.
+use std::cell::RefCell;
 
 // Value enum makes it easier to add more types to the calculus.
 // Right now we have just Closures and i32.
@@ -47,17 +47,17 @@ enum HeapObj {
 
 // HeapObj is to be allocated on our "heap" and the memory is managed through reference counting.
 // We do nothing about cycles.
-// Thanks to the use of UnsafeCell, when any HeapPtr forces evaluation of HeapObj, all of them will see the change.
+// Thanks to the use of RefCell, when any HeapPtr forces evaluation of HeapObj, all of them will see the change.
 // This allows of implementation of sharing and call-by-need.
 #[derive(Clone)]
 struct HeapPtr {
-    rc: Rc<UnsafeCell<HeapObj>>,
+    rc: Rc<RefCell<HeapObj>>,
 }
 
 impl HeapPtr {
     fn new(obj: HeapObj) -> Self {
         HeapPtr {
-            rc: Rc::new(UnsafeCell::new(obj)),
+            rc: Rc::new(RefCell::new(obj)),
         }
     }
 
@@ -69,18 +69,12 @@ impl HeapPtr {
         }
     }
 
-    // Acessing the HeapObj self is pointing to. It is safe because we return cloned Rc.
     fn get(&self) -> HeapObj {
-        // safety: The unsafe pointer is just temporary, we clone immediately.
-        unsafe { (*self.rc.get()).clone() }
+        self.rc.borrow().clone()
     }
 
-    // set encapsulate the unsafeness of the accessing and mutation of the HeapObj inside of the UnsafeCell.
     fn set(&self, obj: HeapObj) {
-        // safety: The unsafe pointer is just temporary, no HeapPtr::get is called in parallel, so this is the only unsafe pointer.
-        unsafe {
-            *self.rc.get() = obj;
-        }
+        *self.rc.borrow_mut() = obj;
     }
 
     // This function implements the core of laxy call-by-need evaluation.
@@ -233,7 +227,7 @@ fn main() {
 // What could we do next?
 // - Why do we need dyn/Rc in Closure? Isn't Box enough? How to avoid double pointer skipping?
 //   Box<dyn Fn> doesn't implement Clone, but Value derives Clone because get() clones HeapObj.
-//   To use Box, we'd need to return Ref<HeapObj> borrows (via RefCell) instead of cloning.
+//   To use Box, we'd need to return Ref<HeapObj> borrows instead of cloning.
 //   Relevant: https://github.com/rust-lang/rust/issues/24000#issuecomment-479425396
 // - How to change enum Value to union Value? Rc is in a way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesise the code for the lambdas, including the awkward clones.
