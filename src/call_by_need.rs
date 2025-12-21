@@ -153,8 +153,8 @@ mod test {
         let snd = lambda(move |_x| lambda(move |y| y.clone()));
         // Note: we need to clone 'x' because inner lambda might be called multiple times.
 
-        assert_eq!(force_expect_i32(&ap(ap(fst.clone(), i32(5)), i32(6))), 5);
-        assert_eq!(force_expect_i32(&ap(ap(snd.clone(), i32(5)), i32(6))), 6);
+        assert_eq!(force_expect_i32(&ap(ap(fst, i32(5)), i32(6))), 5);
+        assert_eq!(force_expect_i32(&ap(ap(snd, i32(5)), i32(6))), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -265,9 +265,9 @@ mod test {
             force_expect_i32(&ap(ap(n.clone(), inc.clone()), i32(0)))
         };
 
-        let one = ap(succ.clone(), zero.clone());
-        let two = ap(succ.clone(), one.clone());
-        let three = ap(succ.clone(), two.clone());
+        let one = ap(succ.clone(), zero.clone()); // zero used in to_int below
+        let two = ap(succ.clone(), one.clone());  // one used in to_int below
+        let three = ap(succ, two.clone());        // succ's last use, two used below
 
         assert_eq!(to_int(&zero), 0);
         assert_eq!(to_int(&one), 1);
@@ -306,7 +306,7 @@ mod test {
         assert_eq!(force_expect_i32(&ap(ap(k_comb.clone(), i32(5)), i32(6))), 5);
 
         // S K K x = x (S K K is identity)
-        let skk = ap(ap(s_comb, k_comb.clone()), k_comb);
+        let skk = ap(ap(s_comb, k_comb.clone()), k_comb); // k_comb used twice
         assert_eq!(force_expect_i32(&ap(skk, i32(42))), 42);
     }
 
