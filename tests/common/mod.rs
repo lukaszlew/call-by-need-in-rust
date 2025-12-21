@@ -29,12 +29,4 @@ pub fn counted_const(c: &Counter, val: i32) -> HeapPtr {
     })
 }
 
-/// add = \a.\b. a + b
-pub fn add() -> HeapPtr {
-    lambda(|a| {
-        lambda(move |b| {
-            let a = a.clone();
-            i32(force_expect_i32(&a) + force_expect_i32(&b))
-        })
-    })
-}
+pub use call_by_need_in_rust::plus as add;

@@ -119,6 +119,17 @@ pub fn ap(f: HeapPtr, arg: HeapPtr) -> HeapPtr {
 // We don't have helpers for "lambda" and "var" constructs in the lambda calculus, because
 // we use Rust syntax for that. This is the so-called Higher-Order-Abstract-Syntax (HOAS) technique.
 
+/// plus = \a.\b. a + b (primitive addition for i32)
+#[must_use]
+pub fn plus() -> HeapPtr {
+    lambda(|a| {
+        lambda(move |b| {
+            let a = a.clone();
+            i32(force_expect_i32(&a) + force_expect_i32(&b))
+        })
+    })
+}
+
 /// Helper for tests: force and extract i32.
 #[must_use]
 pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
@@ -131,7 +142,7 @@ pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
 // ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::{ap, force_expect_i32, i32, lambda, HeapPtr};
+    use crate::{ap, force_expect_i32, i32, lambda, plus, HeapPtr};
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -160,14 +171,8 @@ mod test {
         })
     }
 
-    /// add = \a.\b. a + b
     fn add() -> HeapPtr {
-        lambda(|a| {
-            lambda(move |b| {
-                let a = a.clone();
-                i32(force_expect_i32(&a) + force_expect_i32(&b))
-            })
-        })
+        plus()
     }
 
     // -------------------------------------------------------------------------
@@ -177,6 +182,14 @@ mod test {
     fn identity_applied() {
         let t = ap(lambda(|x| x), i32(5));
         assert_eq!(force_expect_i32(&t), 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // Primitive addition: plus 3 4 = 7
+    // -------------------------------------------------------------------------
+    #[test]
+    fn plus_primitive() {
+        assert_eq!(force_expect_i32(&ap(ap(plus(), i32(3)), i32(4))), 7);
     }
 
     // -------------------------------------------------------------------------
