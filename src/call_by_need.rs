@@ -33,7 +33,7 @@ enum HeapObj {
 // Thanks to the use of RefCell, when any HeapPtr forces evaluation of HeapObj, all of them will see the change.
 // This allows of implementation of sharing and call-by-need.
 #[derive(Clone)]
-struct HeapPtr {
+pub struct HeapPtr {
     rc: Rc<RefCell<HeapObj>>,
 }
 
@@ -45,7 +45,7 @@ impl HeapPtr {
     }
 
     // Extract i32 if this is a forced Value::I32.
-    fn get_i32(&self) -> Option<i32> {
+    pub fn get_i32(&self) -> Option<i32> {
         match &*self.rc.borrow() {
             HeapObj::Value(Value::I32(n)) => Some(*n),
             _ => None,
@@ -68,7 +68,7 @@ impl HeapPtr {
     // - we continue forcing (the result) until we get a value,
     // - and finally we overwrite App(f, arg) in-place with the result.
     // At this point the result (i32 or closure) can be inspected.
-    fn force(&self) {
+    pub fn force(&self) {
         // Extract t1, t2 if this is an App, otherwise return early.
         let (t1, t2) = match &*self.rc.borrow() {
             HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
@@ -100,56 +100,113 @@ type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
 // We start with some helpers to ease on the rust verboseness (compared to textual lambda calculus).
 
 // Create HeapPtr for the given Rust closure.
-fn lambda(f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
+pub fn lambda(f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
     HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
 }
 
 // Create HeapPtr for i32. We only boxed integers.
-fn i32(n: i32) -> HeapPtr {
+pub fn i32(n: i32) -> HeapPtr {
     HeapPtr::new(HeapObj::Value(Value::I32(n)))
 }
 
 // Allocate unevaluated lambda application.
-fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
+pub fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
     HeapPtr::new(HeapObj::App(f.clone(), arg.clone()))
 }
 // We don't have helpers for for "lambda" and "var" constructs in the lambda calculus, because,
 // we use Rust syntax for that. This is so-called to Higher-Order-Abstract-Syntax (HOAS) techique.
 
-// This module has examples of usage of the machinery above.
+// Helper for tests: force and extract i32.
+pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
+    ptr.force();
+    ptr.get_i32().unwrap()
+}
+
+// ============================================================================
+// Didactic tests: These tests demonstrate key concepts of call-by-need.
+// ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::ap;
-    use crate::i32;
-    use crate::lambda;
-    use crate::HeapPtr;
+    use crate::{ap, force_expect_i32, i32, lambda, HeapPtr};
 
-    // Since most our examples or tests should evaluate to int, this helper reduces the verboseness as well.
-    fn force_expect_i32(ptr: &HeapPtr) -> i32 {
-        ptr.force();
-        ptr.get_i32().unwrap()
-    }
-
-    // Simplest application.
+    // -------------------------------------------------------------------------
+    // Basic application: (\x -> x) 5 = 5
+    // -------------------------------------------------------------------------
     #[test]
     fn identity_applied() {
-        // (\x -> x) 5
         let t = ap(&lambda(|x| x), &i32(5));
-        // assert_eq!(t.get(), 5);
         assert_eq!(force_expect_i32(&t), 5);
     }
 
-    // Test that identity doesn't corrupt shared arguments.
+    // -------------------------------------------------------------------------
+    // Currying: fst and snd projections.
+    // fst = \x.\y.x    snd = \x.\y.y
+    // -------------------------------------------------------------------------
     #[test]
-    fn identity_preserves_sharing() {
-        let arg = i32(42);
-        let result = ap(&lambda(|x| x), &arg);
-        result.force();
-        // arg should still be 42, not corrupted
-        assert_eq!(arg.get_i32().unwrap(), 42);
+    fn fst_and_snd() {
+        let fst = lambda(move |x| lambda(move |_y| x.clone()));
+        let snd = lambda(move |_x| lambda(move |y| y.clone()));
+        // Note: we need to clone 'x' because inner lambda might be called multiple times.
+
+        assert_eq!(force_expect_i32(&ap(&ap(&fst, &i32(5)), &i32(6))), 5);
+        assert_eq!(force_expect_i32(&ap(&ap(&snd, &i32(5)), &i32(6))), 6);
     }
 
-    // Test that a shared thunk is evaluated only once.
+    // -------------------------------------------------------------------------
+    // Laziness: unused arguments are never evaluated.
+    // const 42 expensive = 42, and expensive is never called.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn unused_argument_not_evaluated() {
+        static mut CALL_COUNT: i32 = 0;
+
+        let expensive = lambda(|_| {
+            unsafe { CALL_COUNT += 1; }
+            i32(999)
+        });
+
+        // const = \x.\y. x (ignores second argument)
+        let const_fn = lambda(|x| lambda(move |_y| x.clone()));
+
+        let unused_thunk = ap(&expensive, &i32(0));
+        let result = ap(&ap(&const_fn, &i32(42)), &unused_thunk);
+
+        assert_eq!(force_expect_i32(&result), 42);
+        assert_eq!(unsafe { CALL_COUNT }, 0); // expensive was never called!
+    }
+
+    // -------------------------------------------------------------------------
+    // Memoization: forcing twice doesn't re-evaluate.
+    // inc_twice 10 = 12, and inc is called exactly twice (not four times).
+    // -------------------------------------------------------------------------
+    #[test]
+    fn verify_call_by_need() {
+        static mut CALL_COUNT: i32 = 0;
+        fn get_call_count() -> i32 {
+            unsafe { CALL_COUNT }
+        }
+
+        // inc = \n. n + 1
+        let inc = lambda(|x| {
+            unsafe { CALL_COUNT += 1; }
+            i32(force_expect_i32(&x) + 1)
+        });
+
+        // inc_twice = \n. inc (inc n)
+        let inc_twice = lambda(move |n| ap(&inc, &ap(&inc, &n)));
+        let hopefully_12 = ap(&inc_twice, &i32(10));
+
+        assert_eq!(get_call_count(), 0);
+        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(get_call_count(), 2);
+        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(get_call_count(), 2); // Still 2! Memoization works.
+    }
+
+    // -------------------------------------------------------------------------
+    // Sharing: a thunk used twice is evaluated only once.
+    // add thunk thunk = 2, but thunk's closure runs once.
+    // -------------------------------------------------------------------------
     #[test]
     fn shared_thunk_evaluated_once() {
         static mut CALL_COUNT: i32 = 0;
@@ -159,10 +216,9 @@ mod test {
             i32(1)
         });
 
-        // Create a thunk
         let thunk = ap(&expensive, &i32(0));
 
-        // Use the same thunk twice: add thunk thunk
+        // add = \a.\b. a + b
         let add = lambda(|a| {
             lambda(move |b| {
                 let a = a.clone();
@@ -170,74 +226,100 @@ mod test {
             })
         });
 
+        // Use thunk twice: add thunk thunk
         let result = ap(&ap(&add, &thunk), &thunk);
 
         assert_eq!(unsafe { CALL_COUNT }, 0);
         assert_eq!(force_expect_i32(&result), 2);
-        assert_eq!(unsafe { CALL_COUNT }, 1);  // Should be 1, not 2!
+        assert_eq!(unsafe { CALL_COUNT }, 1); // Called once, not twice!
     }
 
-    // Currying on Rust HOAS.
+    // -------------------------------------------------------------------------
+    // Church numerals: classic lambda calculus encoding of natural numbers.
+    // zero = \f.\x. x
+    // succ = \n.\f.\x. f (n f x)
+    // -------------------------------------------------------------------------
     #[test]
-    fn fst_and_snd() {
-        // fst = \x.\y.x
-        let fst = lambda(move |x| lambda(move |y| x.clone()));
-        // snd = \x.\y.y
-        let snd = lambda(move |x| lambda(move |y| y.clone()));
-        // we need to clone 'x' because inner lambda might be called multiple times.
+    fn church_numerals() {
+        let zero = lambda(|_f| lambda(|x| x));
 
-        // fst 5 6 == 5
-        assert_eq!(force_expect_i32(&ap(&ap(&fst, &i32(5)), &i32(6))), 5);
-        // snd 5 6 == 6
-        assert_eq!(force_expect_i32(&ap(&ap(&snd, &i32(5)), &i32(6))), 6);
-    }
-
-    // Verify laziness and call-by-need's memoization.
-    #[test]
-    fn verify_call_by_need() {
-        static mut CALL_COUNT: i32 = 0;
-        fn get_call_count() -> i32 {
-            // safety: single-threaded.
-            unsafe {
-                return CALL_COUNT;
-            }
-        }
-        // We define here what in Haskell could be a "build-in" "+1" function.
-        // inc = \n.n + 1
-        let inc = lambda(|x| {
-            // Tracking call count for test needs.
-            // safety: single-threaded.
-            unsafe {
-                CALL_COUNT += 1;
-            }
-            // We are lazy, so there is no guarantee that x is a value. Need to force first.
-            i32(force_expect_i32(&x) + 1)
+        let succ = lambda(|n| {
+            lambda(move |f| {
+                let n = n.clone();
+                lambda(move |x| {
+                    let n = n.clone();
+                    let f = f.clone();
+                    ap(&f, &ap(&ap(&n, &f), &x))
+                })
+            })
         });
 
-        // inc_twice = \n.inc (inc x)
-        let inc_twice = lambda(move |n| ap(&inc, &ap(&inc, &n)));
-        // hopefully_12 = inc_twice 10
-        let hopefully_12 = &ap(&inc_twice, &i32(10));
+        // Convert church numeral to i32: apply n to inc and 0
+        let inc = lambda(|x| i32(force_expect_i32(&x) + 1));
+        let to_int = |n: &HeapPtr| -> i32 {
+            force_expect_i32(&ap(&ap(n, &inc), &i32(0)))
+        };
 
-        assert_eq!(get_call_count(), 0);
-        assert_eq!(force_expect_i32(&hopefully_12), 12);
-        assert_eq!(get_call_count(), 2);
-        assert_eq!(force_expect_i32(&hopefully_12), 12);
-        assert_eq!(get_call_count(), 2);
-        // Indeed nothing happens on second call of force.
+        let one = ap(&succ, &zero);
+        let two = ap(&succ, &one);
+        let three = ap(&succ, &two);
+
+        assert_eq!(to_int(&zero), 0);
+        assert_eq!(to_int(&one), 1);
+        assert_eq!(to_int(&two), 2);
+        assert_eq!(to_int(&three), 3);
     }
 
+    // -------------------------------------------------------------------------
+    // SKI combinators: a complete basis for lambda calculus.
+    // I = \x. x
+    // K = \x.\y. x
+    // S = \x.\y.\z. x z (y z)
+    // Notably: S K K = I
+    // -------------------------------------------------------------------------
     #[test]
-    fn deep_curring_is_awkward() {
-        // f = \a.\b.\c.a
-        let f = lambda(move |a| {
-            lambda(move |b| {
-                let a = a.clone(); // This is needed.
-                lambda(move |c| a.clone())
+    fn ski_combinators() {
+        let i_comb = lambda(|x| x);
+        let k_comb = lambda(|x| lambda(move |_y| x.clone()));
+        let s_comb = lambda(|x| {
+            lambda(move |y| {
+                let x = x.clone();
+                lambda(move |z| {
+                    let x = x.clone();
+                    let y = y.clone();
+                    let xz = ap(&x, &z);
+                    let yz = ap(&y, &z);
+                    ap(&xz, &yz)
+                })
+            })
+        });
+
+        // I 5 = 5
+        assert_eq!(force_expect_i32(&ap(&i_comb, &i32(5))), 5);
+
+        // K 5 6 = 5
+        assert_eq!(force_expect_i32(&ap(&ap(&k_comb, &i32(5)), &i32(6))), 5);
+
+        // S K K x = x (S K K is identity)
+        let skk = ap(&ap(&s_comb, &k_comb), &k_comb);
+        assert_eq!(force_expect_i32(&ap(&skk, &i32(42))), 42);
+    }
+
+    // -------------------------------------------------------------------------
+    // Deep currying is awkward in Rust due to manual cloning.
+    // f = \a.\b.\c. a
+    // -------------------------------------------------------------------------
+    #[test]
+    fn deep_currying_is_awkward() {
+        let _f = lambda(move |a| {
+            lambda(move |_b| {
+                let a = a.clone(); // This clone is needed for the next level.
+                lambda(move |_c| a.clone())
             })
         });
     }
 }
+
 // So what did we learn?
 // - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
 // - The code of Rust lambdas that are passed to `lambda` are compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
@@ -245,13 +327,6 @@ mod test {
 // - Closures use Rc<dyn Fn> to enable cloning for memoization of shared values.
 // - `ap` does not call a function but allocates unvaluated object on the heap.
 //
-
-fn main() {
-    // Silence 'dead code warnings'.
-    let t = ap(&lambda(|x| x), &i32(5));
-    t.force();
-    let _i = t.get_i32().unwrap();
-}
 
 // What could we do next?
 // - Closure must be Rc<dyn Fn>, not Box. Box<dyn Fn> isn't Clone, but cloning is needed when
