@@ -14,25 +14,8 @@ enum Value {
     Closure(Closure),
 }
 
-// This are just some accesseors that make the code less messy.
-impl Value {
-    fn i32(self: Value) -> Option<i32> {
-        if let Value::I32(i) = self {
-            return Some(i);
-        }
-        None
-    }
-
-    fn closure(self: Value) -> Option<Closure> {
-        if let Value::Closure(c) = self {
-            return Some(c);
-        }
-        None
-    }
-}
-
-// HeapObj represents unevaluead (App) or evaluated lambda calculus terms.
-// When in heap memory, HeapObj will be in UnsafeCell and can be mutated in place when the terms are evaluated.
+// HeapObj represents unevaluated (App) or evaluated lambda calculus terms.
+// When in heap memory, HeapObj will be in RefCell and can be mutated in place when the terms are evaluated.
 // Evaluation transmutes App into Value.
 //
 // HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
@@ -61,48 +44,56 @@ impl HeapPtr {
         }
     }
 
-    // Another helper.
-    fn value(&self) -> Option<Value> {
-        match self.get() {
-            HeapObj::Value(v) => Some(v.clone()),
+    // Extract i32 if this is a forced Value::I32.
+    fn get_i32(&self) -> Option<i32> {
+        match &*self.rc.borrow() {
+            HeapObj::Value(Value::I32(n)) => Some(*n),
             _ => None,
         }
-    }
-
-    fn get(&self) -> HeapObj {
-        self.rc.borrow().clone()
     }
 
     fn set(&self, obj: HeapObj) {
         *self.rc.borrow_mut() = obj;
     }
 
-    // This function implements the core of laxy call-by-need evaluation.
+    fn get(&self) -> HeapObj {
+        self.rc.borrow().clone()
+    }
+
+    // This function implements the core of lazy call-by-need evaluation.
     // If HeapObj::Value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
     // - we force f first,
     // - we assume that f is now a Closure, (i32 would be a 'type' error),
     // - we apply the closure to the (unforced) argument,
-    // - we contineu forcing (the result) until we get a value,
+    // - we continue forcing (the result) until we get a value,
     // - and finally we overwrite App(f, arg) in-place with the result.
     // At this point the result (i32 or closure) can be inspected.
     fn force(&self) {
-        if let HeapObj::App(t1, t2) = self.get() {
-            t1.force();
-            // t2.force();
-            // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-            let closure: Closure = t1.value().unwrap().closure().unwrap();
-            let new_ptr: HeapPtr = closure(t2.clone());
-            new_ptr.force();
-            self.set(new_ptr.get());
-            // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
+        // Extract t1, t2 if this is an App, otherwise return early.
+        let (t1, t2) = match &*self.rc.borrow() {
+            HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
+            HeapObj::Value(_) => return,
         };
+
+        t1.force();
+        // t2.force();
+        // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
+
+        // Borrow t1 to call its closure - no need to clone the closure itself.
+        let new_ptr = match &*t1.rc.borrow() {
+            HeapObj::Value(Value::Closure(closure)) => closure(t2),
+            _ => panic!("expected closure after forcing"),
+        };
+
+        new_ptr.force();
+        self.set(new_ptr.get());
+        // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
     }
 }
 
 // Finally we learn that Closure is an ordinary Rust closure.
 // Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
-// Because of that I was forced to Rc it as well.
-// This additional pointer jumping is probably one "the biggest" inefficiency of this implementation.
+// We use Rc because closures need to be cloneable (for memoization when values are shared).
 type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
 
 // With the lambda calculus runtime implemented, we move on to examples.
@@ -136,7 +127,7 @@ mod test {
     // Since most our examples or tests should evaluate to int, this helper reduces the verboseness as well.
     fn force_expect_i32(ptr: &HeapPtr) -> i32 {
         ptr.force();
-        ptr.value().unwrap().i32().unwrap()
+        ptr.get_i32().unwrap()
     }
 
     // Simplest application.
@@ -146,6 +137,44 @@ mod test {
         let t = ap(&lambda(|x| x), &i32(5));
         // assert_eq!(t.get(), 5);
         assert_eq!(force_expect_i32(&t), 5);
+    }
+
+    // Test that identity doesn't corrupt shared arguments.
+    #[test]
+    fn identity_preserves_sharing() {
+        let arg = i32(42);
+        let result = ap(&lambda(|x| x), &arg);
+        result.force();
+        // arg should still be 42, not corrupted
+        assert_eq!(arg.get_i32().unwrap(), 42);
+    }
+
+    // Test that a shared thunk is evaluated only once.
+    #[test]
+    fn shared_thunk_evaluated_once() {
+        static mut CALL_COUNT: i32 = 0;
+
+        let expensive = lambda(|_| {
+            unsafe { CALL_COUNT += 1; }
+            i32(1)
+        });
+
+        // Create a thunk
+        let thunk = ap(&expensive, &i32(0));
+
+        // Use the same thunk twice: add thunk thunk
+        let add = lambda(|a| {
+            lambda(move |b| {
+                let a = a.clone();
+                i32(force_expect_i32(&a) + force_expect_i32(&b))
+            })
+        });
+
+        let result = ap(&ap(&add, &thunk), &thunk);
+
+        assert_eq!(unsafe { CALL_COUNT }, 0);
+        assert_eq!(force_expect_i32(&result), 2);
+        assert_eq!(unsafe { CALL_COUNT }, 1);  // Should be 1, not 2!
     }
 
     // Currying on Rust HOAS.
@@ -213,7 +242,7 @@ mod test {
 // - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
 // - The code of Rust lambdas that are passed to `lambda` are compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
 // - `lambda` allocates a closure, not a function on the heap, it is a struct containing HeapPtrs to all referenced variables.
-// - This implementation has additional indirection to closures (Rc in Closure), which Rust asks for, but probably is not needed.
+// - Closures use Rc<dyn Fn> to enable cloning for memoization of shared values.
 // - `ap` does not call a function but allocates unvaluated object on the heap.
 //
 
@@ -221,14 +250,12 @@ fn main() {
     // Silence 'dead code warnings'.
     let t = ap(&lambda(|x| x), &i32(5));
     t.force();
-    let _i = t.value().unwrap().i32().unwrap();
+    let _i = t.get_i32().unwrap();
 }
 
 // What could we do next?
-// - Why do we need dyn/Rc in Closure? Isn't Box enough? How to avoid double pointer skipping?
-//   Box<dyn Fn> doesn't implement Clone, but Value derives Clone because get() clones HeapObj.
-//   To use Box, we'd need to return Ref<HeapObj> borrows instead of cloning.
-//   Relevant: https://github.com/rust-lang/rust/issues/24000#issuecomment-479425396
+// - Closure must be Rc<dyn Fn>, not Box. Box<dyn Fn> isn't Clone, but cloning is needed when
+//   memoizing shared values (e.g., identity returns its argument, which may be shared elsewhere).
 // - How to change enum Value to union Value? Rc is in a way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesise the code for the lambdas, including the awkward clones.
 // - Runtime `force` have two recursive calles, so Rust stack is a part of the runtime.
