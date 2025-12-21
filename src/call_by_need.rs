@@ -1,29 +1,28 @@
-// Reference counting is our GC replacement.
-use std::rc::Rc;
-
-// We use RefCell to mutate heap objects in-place when forcing lambda evaluation.
 use std::cell::RefCell;
+use std::rc::Rc;
 
 // Value enum makes it easier to add more types to the calculus.
 // Right now we have just Closures and i32.
 // If our calculus was typed, we could use union instead of enum, since we would always know which enum case it is.
-#[derive(Clone)]
 enum Value {
     I32(i32),
-    Closure(Closure),
+    Closure(Box<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>),
 }
 
 // HeapObj represents unevaluated (App) or evaluated lambda calculus terms.
 // When in heap memory, HeapObj will be in RefCell and can be mutated in place when the terms are evaluated.
-// Evaluation transmutes App into Value.
+// Evaluation transmutes App into Ind (pointing to the result).
+//
+// Why Ind? After forcing App(f,x), we must cache the result. We can't copy it into App's slot
+// because Box<dyn Fn> isn't Clone. So we point to it instead.
 //
 // HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
 // HeapObj::Value(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
 // I'm not sure what is the i32 representation. Maybe CONSTR?
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
-#[derive(Clone)]
 enum HeapObj {
     App(HeapPtr, HeapPtr),
+    Ind(HeapPtr),
     Value(Value),
 }
 
@@ -44,12 +43,6 @@ impl HeapPtr {
     }
 }
 
-// Finally we learn that Closure is an ordinary Rust closure.
-// Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
-// We use Rc because closures need to be cloneable (for memoization when values are shared).
-// Closures take both the argument and a reference to Runtime for allocation.
-type Closure = Rc<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>;
-
 // =============================================================================
 // Runtime
 // =============================================================================
@@ -69,21 +62,33 @@ impl Runtime {
     // Heap access (will change when heap moves into Runtime)
     // -------------------------------------------------------------------------
 
-    fn get(&self, ptr: &HeapPtr) -> HeapObj {
-        ptr.rc.borrow().clone()
-    }
-
     fn set(&self, ptr: &HeapPtr, obj: HeapObj) {
         *ptr.rc.borrow_mut() = obj;
+    }
+
+    fn follow_ind(&self, ptr: &HeapPtr) -> HeapPtr {
+        let mut current = ptr.clone();
+        loop {
+            let next = match &*current.rc.borrow() {
+                HeapObj::Ind(target) => Some(target.clone()),
+                _ => None,
+            };
+            match next {
+                Some(target) => current = target,
+                None => return current,
+            }
+        }
     }
 
     /// Extract i32 if this is a forced Value::I32.
     #[must_use]
     pub fn get_i32(&self, ptr: &HeapPtr) -> Option<i32> {
-        match &*ptr.rc.borrow() {
+        let target = self.follow_ind(ptr);
+        let result = match &*target.rc.borrow() {
             HeapObj::Value(Value::I32(n)) => Some(*n),
             _ => None,
-        }
+        };
+        result
     }
 
     // This function implements the core of lazy call-by-need evaluation.
@@ -92,25 +97,31 @@ impl Runtime {
     // - we assume that f is now a Closure, (i32 would be a 'type' error),
     // - we apply the closure to the (unforced) argument,
     // - we continue forcing (the result) until we get a value,
-    // - and finally we overwrite App(f, arg) in-place with the result.
+    // - and finally we overwrite App(f, arg) in-place with Ind pointing to result.
     // At this point the result (i32 or closure) can be inspected.
     pub fn force(&self, ptr: &HeapPtr) {
+        let target = self.follow_ind(ptr);
+
         // Extract t1, t2 if this is an App, otherwise return early.
-        let (t1, t2) = match &*ptr.rc.borrow() {
+        let (t1, t2) = match &*target.rc.borrow() {
             HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
             HeapObj::Value(_) => return,
+            HeapObj::Ind(_) => unreachable!("follow_ind should have resolved this"),
         };
 
         self.force(&t1);
 
+        let t1_target = self.follow_ind(&t1);
         // Borrow t1 to call its closure - no need to clone the closure itself.
-        let new_ptr = match &*t1.rc.borrow() {
+        let new_ptr = match &*t1_target.rc.borrow() {
             HeapObj::Value(Value::Closure(closure)) => closure(t2, self),
-            _ => panic!("expected closure after forcing"),
+            HeapObj::Value(Value::I32(_)) => panic!("expected closure, got i32"),
+            _ => panic!("expected value after forcing"),
         };
 
         self.force(&new_ptr);
-        self.set(ptr, self.get(&new_ptr));
+        // Short-circuit: point directly to Value, not to another Ind. Avoids Ind chains.
+        self.set(&target, HeapObj::Ind(self.follow_ind(&new_ptr)));
     }
 
     // -------------------------------------------------------------------------
@@ -120,7 +131,7 @@ impl Runtime {
     /// Create HeapPtr for the given Rust closure.
     #[must_use]
     pub fn lambda(&self, f: impl Fn(HeapPtr, &Runtime) -> HeapPtr + 'static) -> HeapPtr {
-        HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
+        HeapPtr::new(HeapObj::Value(Value::Closure(Box::new(f))))
     }
 
     /// Create HeapPtr for i32.
