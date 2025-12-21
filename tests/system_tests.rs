@@ -7,7 +7,7 @@ use call_by_need_in_rust::{ap, force_expect_i32, i32, lambda};
 #[test]
 fn identity_preserves_sharing() {
     let arg = i32(42);
-    let result = ap(&lambda(|x| x), &arg);
+    let result = ap(lambda(|x| x), arg.clone());
     result.force();
     // arg should still be 42, not corrupted
     assert_eq!(arg.get_i32().unwrap(), 42);
@@ -32,13 +32,13 @@ fn diamond_sharing() {
     });
 
     // base = inc 10 (shared)
-    let base = ap(&inc, &i32(10));
+    let base = ap(inc.clone(), i32(10));
     // left = inc base
-    let left = ap(&inc, &base);
+    let left = ap(inc.clone(), base.clone());
     // right = inc base
-    let right = ap(&inc, &base);
+    let right = ap(inc, base);
     // result = left + right = (base+1) + (base+1) = 11+1 + 11+1 = 24
-    let result = ap(&ap(&add, &left), &right);
+    let result = ap(ap(add, left), right);
 
     assert_eq!(unsafe { CALL_COUNT }, 0);
     assert_eq!(force_expect_i32(&result), 24);
@@ -60,10 +60,10 @@ fn nested_thunks() {
     let outer_fn = lambda(move |x| {
         unsafe { OUTER_COUNT += 1; }
         let inner_fn = inner_fn.clone();
-        ap(&inner_fn, &x)
+        ap(inner_fn, x)
     });
 
-    let thunk = ap(&outer_fn, &i32(5));
+    let thunk = ap(outer_fn, i32(5));
 
     // Force multiple times
     assert_eq!(force_expect_i32(&thunk), 10);
@@ -90,11 +90,11 @@ fn partial_application_sharing() {
     });
 
     // add5 = add 5 (partial application)
-    let add5 = ap(&add, &i32(5));
+    let add5 = ap(add, i32(5));
 
     // Use add5 twice
-    let r1 = ap(&add5, &i32(10));
-    let r2 = ap(&add5, &i32(20));
+    let r1 = ap(add5.clone(), i32(10));
+    let r2 = ap(add5, i32(20));
 
     assert_eq!(unsafe { CALL_COUNT }, 0);
     assert_eq!(force_expect_i32(&r1), 15);
@@ -116,9 +116,9 @@ fn deep_sharing() {
     });
 
     // Create a chain: a -> b -> c, all shared
-    let a = ap(&inc, &i32(0));   // 1
-    let b = ap(&inc, &a);        // 2
-    let c = ap(&inc, &b);        // 3
+    let a = ap(inc.clone(), i32(0)); // 1
+    let b = ap(inc.clone(), a.clone()); // 2
+    let c = ap(inc, b.clone()); // 3
 
     // Use each multiple times
     let add = lambda(|x| {
@@ -129,11 +129,11 @@ fn deep_sharing() {
     });
 
     // (a + a) + (b + b) + (c + c)
-    let aa = ap(&ap(&add, &a), &a);
-    let bb = ap(&ap(&add, &b), &b);
-    let cc = ap(&ap(&add, &c), &c);
-    let aabb = ap(&ap(&add, &aa), &bb);
-    let result = ap(&ap(&add, &aabb), &cc);
+    let aa = ap(ap(add.clone(), a.clone()), a);
+    let bb = ap(ap(add.clone(), b.clone()), b);
+    let cc = ap(ap(add.clone(), c.clone()), c);
+    let aabb = ap(ap(add.clone(), aa), bb);
+    let result = ap(ap(add, aabb), cc);
 
     assert_eq!(unsafe { CALL_COUNT }, 0);
     assert_eq!(force_expect_i32(&result), 2 + 4 + 6); // 12
@@ -150,7 +150,7 @@ fn force_is_idempotent() {
     val.force();
     assert_eq!(val.get_i32().unwrap(), 42);
 
-    let thunk = ap(&lambda(|x| x), &i32(99));
+    let thunk = ap(lambda(|x| x), i32(99));
     thunk.force();
     thunk.force();
     thunk.force();
@@ -169,9 +169,9 @@ fn closure_captures_multiple() {
         })
     };
 
-    let a = ap(&make_val(10), &i32(0));
-    let b = ap(&make_val(20), &i32(0));
-    let c = ap(&make_val(30), &i32(0));
+    let a = ap(make_val(10), i32(0));
+    let b = ap(make_val(20), i32(0));
+    let c = ap(make_val(30), i32(0));
 
     // Closure that captures a, b, c
     let sum_abc = lambda(move |_| {
@@ -181,7 +181,7 @@ fn closure_captures_multiple() {
         i32(force_expect_i32(&a) + force_expect_i32(&b) + force_expect_i32(&c))
     });
 
-    let result = ap(&sum_abc, &i32(0));
+    let result = ap(sum_abc, i32(0));
 
     assert_eq!(unsafe { CALL_COUNT }, 0);
     assert_eq!(force_expect_i32(&result), 60);

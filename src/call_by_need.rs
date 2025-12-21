@@ -19,8 +19,8 @@ enum Value {
 // Evaluation transmutes App into Value.
 //
 // HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
-// HeapObj::Valu(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
-// I'm not sure sure what is the i32 representation. Maybe CONSTR?
+// HeapObj::Value(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
+// I'm not sure what is the i32 representation. Maybe CONSTR?
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 enum HeapObj {
@@ -31,7 +31,7 @@ enum HeapObj {
 // HeapObj is to be allocated on our "heap" and the memory is managed through reference counting.
 // We do nothing about cycles.
 // Thanks to the use of RefCell, when any HeapPtr forces evaluation of HeapObj, all of them will see the change.
-// This allows of implementation of sharing and call-by-need.
+// This allows implementation of sharing and call-by-need.
 #[derive(Clone)]
 pub struct HeapPtr {
     rc: Rc<RefCell<HeapObj>>,
@@ -44,7 +44,8 @@ impl HeapPtr {
         }
     }
 
-    // Extract i32 if this is a forced Value::I32.
+    /// Extract i32 if this is a forced Value::I32.
+    #[must_use]
     pub fn get_i32(&self) -> Option<i32> {
         match &*self.rc.borrow() {
             HeapObj::Value(Value::I32(n)) => Some(*n),
@@ -99,24 +100,28 @@ type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
 // With the lambda calculus runtime implemented, we move on to examples.
 // We start with some helpers to ease on the rust verboseness (compared to textual lambda calculus).
 
-// Create HeapPtr for the given Rust closure.
+/// Create HeapPtr for the given Rust closure.
+#[must_use]
 pub fn lambda(f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
     HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
 }
 
-// Create HeapPtr for i32. We only boxed integers.
+/// Create HeapPtr for i32.
+#[must_use]
 pub fn i32(n: i32) -> HeapPtr {
     HeapPtr::new(HeapObj::Value(Value::I32(n)))
 }
 
-// Allocate unevaluated lambda application.
-pub fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
-    HeapPtr::new(HeapObj::App(f.clone(), arg.clone()))
+/// Allocate unevaluated lambda application.
+#[must_use]
+pub fn ap(f: HeapPtr, arg: HeapPtr) -> HeapPtr {
+    HeapPtr::new(HeapObj::App(f, arg))
 }
-// We don't have helpers for for "lambda" and "var" constructs in the lambda calculus, because,
-// we use Rust syntax for that. This is so-called to Higher-Order-Abstract-Syntax (HOAS) techique.
+// We don't have helpers for "lambda" and "var" constructs in the lambda calculus, because
+// we use Rust syntax for that. This is the so-called Higher-Order-Abstract-Syntax (HOAS) technique.
 
-// Helper for tests: force and extract i32.
+/// Helper for tests: force and extract i32.
+#[must_use]
 pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
     ptr.force();
     ptr.get_i32().unwrap()
@@ -134,7 +139,7 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn identity_applied() {
-        let t = ap(&lambda(|x| x), &i32(5));
+        let t = ap(lambda(|x| x), i32(5));
         assert_eq!(force_expect_i32(&t), 5);
     }
 
@@ -148,8 +153,8 @@ mod test {
         let snd = lambda(move |_x| lambda(move |y| y.clone()));
         // Note: we need to clone 'x' because inner lambda might be called multiple times.
 
-        assert_eq!(force_expect_i32(&ap(&ap(&fst, &i32(5)), &i32(6))), 5);
-        assert_eq!(force_expect_i32(&ap(&ap(&snd, &i32(5)), &i32(6))), 6);
+        assert_eq!(force_expect_i32(&ap(ap(fst.clone(), i32(5)), i32(6))), 5);
+        assert_eq!(force_expect_i32(&ap(ap(snd.clone(), i32(5)), i32(6))), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -168,8 +173,8 @@ mod test {
         // const = \x.\y. x (ignores second argument)
         let const_fn = lambda(|x| lambda(move |_y| x.clone()));
 
-        let unused_thunk = ap(&expensive, &i32(0));
-        let result = ap(&ap(&const_fn, &i32(42)), &unused_thunk);
+        let unused_thunk = ap(expensive, i32(0));
+        let result = ap(ap(const_fn, i32(42)), unused_thunk);
 
         assert_eq!(force_expect_i32(&result), 42);
         assert_eq!(unsafe { CALL_COUNT }, 0); // expensive was never called!
@@ -193,8 +198,8 @@ mod test {
         });
 
         // inc_twice = \n. inc (inc n)
-        let inc_twice = lambda(move |n| ap(&inc, &ap(&inc, &n)));
-        let hopefully_12 = ap(&inc_twice, &i32(10));
+        let inc_twice = lambda(move |n| ap(inc.clone(), ap(inc.clone(), n)));
+        let hopefully_12 = ap(inc_twice, i32(10));
 
         assert_eq!(get_call_count(), 0);
         assert_eq!(force_expect_i32(&hopefully_12), 12);
@@ -216,7 +221,7 @@ mod test {
             i32(1)
         });
 
-        let thunk = ap(&expensive, &i32(0));
+        let thunk = ap(expensive, i32(0));
 
         // add = \a.\b. a + b
         let add = lambda(|a| {
@@ -227,7 +232,7 @@ mod test {
         });
 
         // Use thunk twice: add thunk thunk
-        let result = ap(&ap(&add, &thunk), &thunk);
+        let result = ap(ap(add, thunk.clone()), thunk);
 
         assert_eq!(unsafe { CALL_COUNT }, 0);
         assert_eq!(force_expect_i32(&result), 2);
@@ -249,7 +254,7 @@ mod test {
                 lambda(move |x| {
                     let n = n.clone();
                     let f = f.clone();
-                    ap(&f, &ap(&ap(&n, &f), &x))
+                    ap(f.clone(), ap(ap(n, f), x))
                 })
             })
         });
@@ -257,12 +262,12 @@ mod test {
         // Convert church numeral to i32: apply n to inc and 0
         let inc = lambda(|x| i32(force_expect_i32(&x) + 1));
         let to_int = |n: &HeapPtr| -> i32 {
-            force_expect_i32(&ap(&ap(n, &inc), &i32(0)))
+            force_expect_i32(&ap(ap(n.clone(), inc.clone()), i32(0)))
         };
 
-        let one = ap(&succ, &zero);
-        let two = ap(&succ, &one);
-        let three = ap(&succ, &two);
+        let one = ap(succ.clone(), zero.clone());
+        let two = ap(succ.clone(), one.clone());
+        let three = ap(succ.clone(), two.clone());
 
         assert_eq!(to_int(&zero), 0);
         assert_eq!(to_int(&one), 1);
@@ -287,22 +292,22 @@ mod test {
                 lambda(move |z| {
                     let x = x.clone();
                     let y = y.clone();
-                    let xz = ap(&x, &z);
-                    let yz = ap(&y, &z);
-                    ap(&xz, &yz)
+                    let xz = ap(x, z.clone());
+                    let yz = ap(y, z);
+                    ap(xz, yz)
                 })
             })
         });
 
         // I 5 = 5
-        assert_eq!(force_expect_i32(&ap(&i_comb, &i32(5))), 5);
+        assert_eq!(force_expect_i32(&ap(i_comb, i32(5))), 5);
 
         // K 5 6 = 5
-        assert_eq!(force_expect_i32(&ap(&ap(&k_comb, &i32(5)), &i32(6))), 5);
+        assert_eq!(force_expect_i32(&ap(ap(k_comb.clone(), i32(5)), i32(6))), 5);
 
         // S K K x = x (S K K is identity)
-        let skk = ap(&ap(&s_comb, &k_comb), &k_comb);
-        assert_eq!(force_expect_i32(&ap(&skk, &i32(42))), 42);
+        let skk = ap(ap(s_comb, k_comb.clone()), k_comb);
+        assert_eq!(force_expect_i32(&ap(skk, i32(42))), 42);
     }
 
     // -------------------------------------------------------------------------
@@ -325,7 +330,7 @@ mod test {
 // - The code of Rust lambdas that are passed to `lambda` are compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
 // - `lambda` allocates a closure, not a function on the heap, it is a struct containing HeapPtrs to all referenced variables.
 // - Closures use Rc<dyn Fn> to enable cloning for memoization of shared values.
-// - `ap` does not call a function but allocates unvaluated object on the heap.
+// - `ap` does not call a function but allocates unevaluated object on the heap.
 //
 
 // What could we do next?
@@ -333,9 +338,9 @@ mod test {
 //   memoizing shared values (e.g., identity returns its argument, which may be shared elsewhere).
 // - How to change enum Value to union Value? Rc is in a way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesise the code for the lambdas, including the awkward clones.
-// - Runtime `force` have two recursive calles, so Rust stack is a part of the runtime.
-// - Simplest GC is not hard in itself and would be cool to see it. But it would need an explicit acccess to closure captrued variables, wouldn't it?
-// - Would Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
+// - Runtime `force` has two recursive calls, so Rust stack is a part of the runtime.
+// - Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
+// - Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
 // - Would be very cool to have some runtime benchmarks and maybe compute number of allocations.
 // - Would be even cooler to use [Haskell's benchmarks](https://gitlab.haskell.org/ghc/ghc/-/wikis/building/running-tests/performance-tests)
 // - How could be print body of the lambdas? Abstract interpretation?
