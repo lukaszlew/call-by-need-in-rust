@@ -96,8 +96,61 @@ impl HeapPtr {
 // We use Rc because closures need to be cloneable (for memoization when values are shared).
 type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
 
+// =============================================================================
+// Runtime
+// =============================================================================
+
+/// Runtime for the lambda calculus. Will hold the heap in the future.
+pub struct Runtime {
+    // Empty for now - heap will be added here
+}
+
+impl Runtime {
+    #[must_use]
+    pub fn new() -> Self {
+        Runtime {}
+    }
+
+    /// Create HeapPtr for the given Rust closure.
+    #[must_use]
+    pub fn lambda(&self, f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
+        HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
+    }
+
+    /// Create HeapPtr for i32.
+    #[must_use]
+    pub fn i32(&self, n: i32) -> HeapPtr {
+        HeapPtr::new(HeapObj::Value(Value::I32(n)))
+    }
+
+    /// Allocate unevaluated lambda application.
+    #[must_use]
+    pub fn ap(&self, f: HeapPtr, arg: HeapPtr) -> HeapPtr {
+        HeapPtr::new(HeapObj::App(f, arg))
+    }
+
+    /// plus = \a.\b. a + b (primitive addition for i32)
+    #[must_use]
+    pub fn plus(&self) -> HeapPtr {
+        self.lambda(|a| {
+            // Nested lambda needs a new Runtime - but for now we use free functions
+            lambda(move |b| {
+                let a = a.clone();
+                i32(force_expect_i32(&a) + force_expect_i32(&b))
+            })
+        })
+    }
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // With the lambda calculus runtime implemented, we move on to examples.
 // We start with some helpers to ease on the rust verboseness (compared to textual lambda calculus).
+// These free functions delegate to a thread-local or create temporary objects.
 
 /// Create HeapPtr for the given Rust closure.
 #[must_use]
