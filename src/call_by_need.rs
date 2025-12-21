@@ -42,53 +42,6 @@ impl HeapPtr {
             rc: Rc::new(RefCell::new(obj)),
         }
     }
-
-    /// Extract i32 if this is a forced Value::I32.
-    #[must_use]
-    pub fn get_i32(&self) -> Option<i32> {
-        match &*self.rc.borrow() {
-            HeapObj::Value(Value::I32(n)) => Some(*n),
-            _ => None,
-        }
-    }
-
-    fn set(&self, obj: HeapObj) {
-        *self.rc.borrow_mut() = obj;
-    }
-
-    fn get(&self) -> HeapObj {
-        self.rc.borrow().clone()
-    }
-
-    // This function implements the core of lazy call-by-need evaluation.
-    // If HeapObj::Value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
-    // - we force f first,
-    // - we assume that f is now a Closure, (i32 would be a 'type' error),
-    // - we apply the closure to the (unforced) argument,
-    // - we continue forcing (the result) until we get a value,
-    // - and finally we overwrite App(f, arg) in-place with the result.
-    // At this point the result (i32 or closure) can be inspected.
-    pub fn force(&self, rt: &Runtime) {
-        // Extract t1, t2 if this is an App, otherwise return early.
-        let (t1, t2) = match &*self.rc.borrow() {
-            HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
-            HeapObj::Value(_) => return,
-        };
-
-        t1.force(rt);
-        // t2.force();
-        // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-
-        // Borrow t1 to call its closure - no need to clone the closure itself.
-        let new_ptr = match &*t1.rc.borrow() {
-            HeapObj::Value(Value::Closure(closure)) => closure(t2, rt),
-            _ => panic!("expected closure after forcing"),
-        };
-
-        new_ptr.force(rt);
-        self.set(new_ptr.get());
-        // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
-    }
 }
 
 // Finally we learn that Closure is an ordinary Rust closure.
@@ -111,6 +64,58 @@ impl Runtime {
     pub fn new() -> Self {
         Runtime {}
     }
+
+    // -------------------------------------------------------------------------
+    // Heap access (will change when heap moves into Runtime)
+    // -------------------------------------------------------------------------
+
+    fn get(&self, ptr: &HeapPtr) -> HeapObj {
+        ptr.rc.borrow().clone()
+    }
+
+    fn set(&self, ptr: &HeapPtr, obj: HeapObj) {
+        *ptr.rc.borrow_mut() = obj;
+    }
+
+    /// Extract i32 if this is a forced Value::I32.
+    #[must_use]
+    pub fn get_i32(&self, ptr: &HeapPtr) -> Option<i32> {
+        match &*ptr.rc.borrow() {
+            HeapObj::Value(Value::I32(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    // This function implements the core of lazy call-by-need evaluation.
+    // If HeapObj::Value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
+    // - we force f first,
+    // - we assume that f is now a Closure, (i32 would be a 'type' error),
+    // - we apply the closure to the (unforced) argument,
+    // - we continue forcing (the result) until we get a value,
+    // - and finally we overwrite App(f, arg) in-place with the result.
+    // At this point the result (i32 or closure) can be inspected.
+    pub fn force(&self, ptr: &HeapPtr) {
+        // Extract t1, t2 if this is an App, otherwise return early.
+        let (t1, t2) = match &*ptr.rc.borrow() {
+            HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
+            HeapObj::Value(_) => return,
+        };
+
+        self.force(&t1);
+
+        // Borrow t1 to call its closure - no need to clone the closure itself.
+        let new_ptr = match &*t1.rc.borrow() {
+            HeapObj::Value(Value::Closure(closure)) => closure(t2, self),
+            _ => panic!("expected closure after forcing"),
+        };
+
+        self.force(&new_ptr);
+        self.set(ptr, self.get(&new_ptr));
+    }
+
+    // -------------------------------------------------------------------------
+    // Allocation
+    // -------------------------------------------------------------------------
 
     /// Create HeapPtr for the given Rust closure.
     #[must_use]
@@ -151,8 +156,8 @@ impl Default for Runtime {
 /// Helper for tests: force and extract i32.
 #[must_use]
 pub fn force_expect_i32(ptr: &HeapPtr, rt: &Runtime) -> i32 {
-    ptr.force(rt);
-    ptr.get_i32().unwrap()
+    rt.force(ptr);
+    rt.get_i32(ptr).unwrap()
 }
 
 // ============================================================================

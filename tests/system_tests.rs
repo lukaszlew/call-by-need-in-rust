@@ -12,8 +12,8 @@ fn identity_preserves_sharing() {
     let rt = Runtime::new();
     let arg = rt.i32(42);
     let result = rt.ap(rt.lambda(|x, _rt| x), arg.clone());
-    result.force(&rt);
-    assert_eq!(arg.get_i32().unwrap(), 42);
+    rt.force(&result);
+    assert_eq!(rt.get_i32(&arg).unwrap(), 42);
 }
 
 // Diamond dependency: result depends on left and right, both depend on shared base.
@@ -133,16 +133,16 @@ fn deep_sharing() {
 fn force_is_idempotent() {
     let rt = Runtime::new();
     let val = rt.i32(42);
-    val.force(&rt);
-    val.force(&rt);
-    val.force(&rt);
-    assert_eq!(val.get_i32().unwrap(), 42);
+    rt.force(&val);
+    rt.force(&val);
+    rt.force(&val);
+    assert_eq!(rt.get_i32(&val).unwrap(), 42);
 
     let thunk = rt.ap(rt.lambda(|x, _rt| x), rt.i32(99));
-    thunk.force(&rt);
-    thunk.force(&rt);
-    thunk.force(&rt);
-    assert_eq!(thunk.get_i32().unwrap(), 99);
+    rt.force(&thunk);
+    rt.force(&thunk);
+    rt.force(&thunk);
+    assert_eq!(rt.get_i32(&thunk).unwrap(), 99);
 }
 
 // Test closure that captures and uses multiple variables.
