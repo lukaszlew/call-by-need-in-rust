@@ -232,6 +232,8 @@ fn main() {
 
 // What could we do next?
 // - Why do we need dyn/Rc in Closure? Isn't Box enough? How to avoid double pointer skipping?
+//   Box<dyn Fn> doesn't implement Clone, but Value derives Clone because get() clones HeapObj.
+//   To use Box, we'd need to return Ref<HeapObj> borrows (via RefCell) instead of cloning.
 //   Relevant: https://github.com/rust-lang/rust/issues/24000#issuecomment-479425396
 // - How to change enum Value to union Value? Rc is in a way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesise the code for the lambdas, including the awkward clones.
