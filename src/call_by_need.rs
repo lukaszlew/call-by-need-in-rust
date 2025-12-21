@@ -117,22 +117,26 @@ impl Runtime {
     // Allocation
     // -------------------------------------------------------------------------
 
+    fn alloc(&self, obj: HeapObj) -> HeapPtr {
+        HeapPtr::new(obj)
+    }
+
     /// Create HeapPtr for the given Rust closure.
     #[must_use]
     pub fn lambda(&self, f: impl Fn(HeapPtr, &Runtime) -> HeapPtr + 'static) -> HeapPtr {
-        HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
+        self.alloc(HeapObj::Value(Value::Closure(Rc::new(f))))
     }
 
     /// Create HeapPtr for i32.
     #[must_use]
     pub fn i32(&self, n: i32) -> HeapPtr {
-        HeapPtr::new(HeapObj::Value(Value::I32(n)))
+        self.alloc(HeapObj::Value(Value::I32(n)))
     }
 
     /// Allocate unevaluated lambda application.
     #[must_use]
     pub fn ap(&self, f: HeapPtr, arg: HeapPtr) -> HeapPtr {
-        HeapPtr::new(HeapObj::App(f, arg))
+        self.alloc(HeapObj::App(f, arg))
     }
 
     /// plus = \a.\b. a + b (primitive addition for i32)
