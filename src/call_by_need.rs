@@ -68,24 +68,24 @@ impl HeapPtr {
     // - we continue forcing (the result) until we get a value,
     // - and finally we overwrite App(f, arg) in-place with the result.
     // At this point the result (i32 or closure) can be inspected.
-    pub fn force(&self) {
+    pub fn force(&self, rt: &Runtime) {
         // Extract t1, t2 if this is an App, otherwise return early.
         let (t1, t2) = match &*self.rc.borrow() {
             HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
             HeapObj::Value(_) => return,
         };
 
-        t1.force();
+        t1.force(rt);
         // t2.force();
         // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
 
         // Borrow t1 to call its closure - no need to clone the closure itself.
         let new_ptr = match &*t1.rc.borrow() {
-            HeapObj::Value(Value::Closure(closure)) => closure(t2),
+            HeapObj::Value(Value::Closure(closure)) => closure(t2, rt),
             _ => panic!("expected closure after forcing"),
         };
 
-        new_ptr.force();
+        new_ptr.force(rt);
         self.set(new_ptr.get());
         // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
     }
@@ -94,7 +94,8 @@ impl HeapPtr {
 // Finally we learn that Closure is an ordinary Rust closure.
 // Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
 // We use Rc because closures need to be cloneable (for memoization when values are shared).
-type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
+// Closures take both the argument and a reference to Runtime for allocation.
+type Closure = Rc<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>;
 
 // =============================================================================
 // Runtime
@@ -113,7 +114,7 @@ impl Runtime {
 
     /// Create HeapPtr for the given Rust closure.
     #[must_use]
-    pub fn lambda(&self, f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
+    pub fn lambda(&self, f: impl Fn(HeapPtr, &Runtime) -> HeapPtr + 'static) -> HeapPtr {
         HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
     }
 
@@ -132,11 +133,10 @@ impl Runtime {
     /// plus = \a.\b. a + b (primitive addition for i32)
     #[must_use]
     pub fn plus(&self) -> HeapPtr {
-        self.lambda(|a| {
-            // Nested lambda needs a new Runtime - but for now we use free functions
-            lambda(move |b| {
+        self.lambda(|a, rt| {
+            rt.lambda(move |b, rt| {
                 let a = a.clone();
-                i32(force_expect_i32(&a) + force_expect_i32(&b))
+                rt.i32(force_expect_i32(&a, rt) + force_expect_i32(&b, rt))
             })
         })
     }
@@ -148,45 +148,10 @@ impl Default for Runtime {
     }
 }
 
-// With the lambda calculus runtime implemented, we move on to examples.
-// We start with some helpers to ease on the rust verboseness (compared to textual lambda calculus).
-// These free functions delegate to a thread-local or create temporary objects.
-
-/// Create HeapPtr for the given Rust closure.
-#[must_use]
-pub fn lambda(f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
-    HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
-}
-
-/// Create HeapPtr for i32.
-#[must_use]
-pub fn i32(n: i32) -> HeapPtr {
-    HeapPtr::new(HeapObj::Value(Value::I32(n)))
-}
-
-/// Allocate unevaluated lambda application.
-#[must_use]
-pub fn ap(f: HeapPtr, arg: HeapPtr) -> HeapPtr {
-    HeapPtr::new(HeapObj::App(f, arg))
-}
-// We don't have helpers for "lambda" and "var" constructs in the lambda calculus, because
-// we use Rust syntax for that. This is the so-called Higher-Order-Abstract-Syntax (HOAS) technique.
-
-/// plus = \a.\b. a + b (primitive addition for i32)
-#[must_use]
-pub fn plus() -> HeapPtr {
-    lambda(|a| {
-        lambda(move |b| {
-            let a = a.clone();
-            i32(force_expect_i32(&a) + force_expect_i32(&b))
-        })
-    })
-}
-
 /// Helper for tests: force and extract i32.
 #[must_use]
-pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
-    ptr.force();
+pub fn force_expect_i32(ptr: &HeapPtr, rt: &Runtime) -> i32 {
+    ptr.force(rt);
     ptr.get_i32().unwrap()
 }
 
@@ -195,7 +160,7 @@ pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
 // ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::{ap, force_expect_i32, i32, lambda, plus, HeapPtr};
+    use crate::{force_expect_i32, HeapPtr, Runtime};
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -207,25 +172,21 @@ mod test {
     }
 
     /// Create an increment function that counts how many times it's called.
-    fn counted_inc(c: &Counter) -> HeapPtr {
+    fn counted_inc(rt: &Runtime, c: &Counter) -> HeapPtr {
         let c = c.clone();
-        lambda(move |x| {
+        rt.lambda(move |x, rt| {
             c.set(c.get() + 1);
-            i32(force_expect_i32(&x) + 1)
+            rt.i32(force_expect_i32(&x, rt) + 1)
         })
     }
 
     /// Create a thunk that returns `val` and increments counter when forced.
-    fn counted_const(c: &Counter, val: i32) -> HeapPtr {
+    fn counted_const(rt: &Runtime, c: &Counter, val: i32) -> HeapPtr {
         let c = c.clone();
-        lambda(move |_| {
+        rt.lambda(move |_, rt| {
             c.set(c.get() + 1);
-            i32(val)
+            rt.i32(val)
         })
-    }
-
-    fn add() -> HeapPtr {
-        plus()
     }
 
     // -------------------------------------------------------------------------
@@ -233,8 +194,9 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn identity_applied() {
-        let t = ap(lambda(|x| x), i32(5));
-        assert_eq!(force_expect_i32(&t), 5);
+        let rt = Runtime::new();
+        let t = rt.ap(rt.lambda(|x, _rt| x), rt.i32(5));
+        assert_eq!(force_expect_i32(&t, &rt), 5);
     }
 
     // -------------------------------------------------------------------------
@@ -242,7 +204,8 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn plus_primitive() {
-        assert_eq!(force_expect_i32(&ap(ap(plus(), i32(3)), i32(4))), 7);
+        let rt = Runtime::new();
+        assert_eq!(force_expect_i32(&rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt), 7);
     }
 
     // -------------------------------------------------------------------------
@@ -251,12 +214,16 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn fst_and_snd() {
-        let fst = lambda(move |x| lambda(move |_y| x.clone()));
-        let snd = lambda(move |_x| lambda(move |y| y.clone()));
-        // Note: we need to clone 'x' because inner lambda might be called multiple times.
+        let rt = Runtime::new();
+        let fst = rt.lambda(move |x, rt| {
+            rt.lambda(move |_y, _rt| x.clone())
+        });
+        let snd = rt.lambda(move |_x, rt| {
+            rt.lambda(move |y, _rt| y.clone())
+        });
 
-        assert_eq!(force_expect_i32(&ap(ap(fst, i32(5)), i32(6))), 5);
-        assert_eq!(force_expect_i32(&ap(ap(snd, i32(5)), i32(6))), 6);
+        assert_eq!(force_expect_i32(&rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt), 5);
+        assert_eq!(force_expect_i32(&rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -265,16 +232,19 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn unused_argument_not_evaluated() {
+        let rt = Runtime::new();
         let c = counter();
-        let expensive = counted_const(&c, 999);
+        let expensive = counted_const(&rt, &c, 999);
 
         // const = \x.\y. x (ignores second argument)
-        let const_fn = lambda(|x| lambda(move |_y| x.clone()));
+        let const_fn = rt.lambda(|x, rt| {
+            rt.lambda(move |_y, _rt| x.clone())
+        });
 
-        let unused_thunk = ap(expensive, i32(0));
-        let result = ap(ap(const_fn, i32(42)), unused_thunk);
+        let unused_thunk = rt.ap(expensive, rt.i32(0));
+        let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
 
-        assert_eq!(force_expect_i32(&result), 42);
+        assert_eq!(force_expect_i32(&result, &rt), 42);
         assert_eq!(c.get(), 0); // expensive was never called!
     }
 
@@ -284,17 +254,20 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn verify_call_by_need() {
+        let rt = Runtime::new();
         let c = counter();
-        let inc = counted_inc(&c);
+        let inc = counted_inc(&rt, &c);
 
         // inc_twice = \n. inc (inc n)
-        let inc_twice = lambda(move |n| ap(inc.clone(), ap(inc.clone(), n)));
-        let hopefully_12 = ap(inc_twice, i32(10));
+        let inc_twice = rt.lambda(move |n, rt| {
+            rt.ap(inc.clone(), rt.ap(inc.clone(), n))
+        });
+        let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
         assert_eq!(c.get(), 0);
-        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(force_expect_i32(&hopefully_12, &rt), 12);
         assert_eq!(c.get(), 2);
-        assert_eq!(force_expect_i32(&hopefully_12), 12);
+        assert_eq!(force_expect_i32(&hopefully_12, &rt), 12);
         assert_eq!(c.get(), 2); // Still 2! Memoization works.
     }
 
@@ -304,15 +277,16 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn shared_thunk_evaluated_once() {
+        let rt = Runtime::new();
         let c = counter();
-        let expensive = counted_const(&c, 1);
-        let thunk = ap(expensive, i32(0));
+        let expensive = counted_const(&rt, &c, 1);
+        let thunk = rt.ap(expensive, rt.i32(0));
 
         // Use thunk twice: add thunk thunk
-        let result = ap(ap(add(), thunk.clone()), thunk);
+        let result = rt.ap(rt.ap(rt.plus(), thunk.clone()), thunk);
 
         assert_eq!(c.get(), 0);
-        assert_eq!(force_expect_i32(&result), 2);
+        assert_eq!(force_expect_i32(&result, &rt), 2);
         assert_eq!(c.get(), 1); // Called once, not twice!
     }
 
@@ -323,28 +297,33 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn church_numerals() {
-        let zero = lambda(|_f| lambda(|x| x));
+        let rt = Runtime::new();
+        let zero = rt.lambda(|_f, rt| {
+            rt.lambda(|x, _rt| x)
+        });
 
-        let succ = lambda(|n| {
-            lambda(move |f| {
+        let succ = rt.lambda(|n, rt| {
+            rt.lambda(move |f, rt| {
                 let n = n.clone();
-                lambda(move |x| {
+                rt.lambda(move |x, rt| {
                     let n = n.clone();
                     let f = f.clone();
-                    ap(f.clone(), ap(ap(n, f), x))
+                    rt.ap(f.clone(), rt.ap(rt.ap(n, f), x))
                 })
             })
         });
 
         // Convert church numeral to i32: apply n to inc and 0
-        let inc = lambda(|x| i32(force_expect_i32(&x) + 1));
+        let inc = rt.lambda(|x, rt| {
+            rt.i32(force_expect_i32(&x, rt) + 1)
+        });
         let to_int = |n: &HeapPtr| -> i32 {
-            force_expect_i32(&ap(ap(n.clone(), inc.clone()), i32(0)))
+            force_expect_i32(&rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)), &rt)
         };
 
-        let one = ap(succ.clone(), zero.clone()); // zero used in to_int below
-        let two = ap(succ.clone(), one.clone());  // one used in to_int below
-        let three = ap(succ, two.clone());        // succ's last use, two used below
+        let one = rt.ap(succ.clone(), zero.clone());
+        let two = rt.ap(succ.clone(), one.clone());
+        let three = rt.ap(succ, two.clone());
 
         assert_eq!(to_int(&zero), 0);
         assert_eq!(to_int(&one), 1);
@@ -361,30 +340,33 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn ski_combinators() {
-        let i_comb = lambda(|x| x);
-        let k_comb = lambda(|x| lambda(move |_y| x.clone()));
-        let s_comb = lambda(|x| {
-            lambda(move |y| {
+        let rt = Runtime::new();
+        let i_comb = rt.lambda(|x, _rt| x);
+        let k_comb = rt.lambda(|x, rt| {
+            rt.lambda(move |_y, _rt| x.clone())
+        });
+        let s_comb = rt.lambda(|x, rt| {
+            rt.lambda(move |y, rt| {
                 let x = x.clone();
-                lambda(move |z| {
+                rt.lambda(move |z, rt| {
                     let x = x.clone();
                     let y = y.clone();
-                    let xz = ap(x, z.clone());
-                    let yz = ap(y, z);
-                    ap(xz, yz)
+                    let xz = rt.ap(x, z.clone());
+                    let yz = rt.ap(y, z);
+                    rt.ap(xz, yz)
                 })
             })
         });
 
         // I 5 = 5
-        assert_eq!(force_expect_i32(&ap(i_comb, i32(5))), 5);
+        assert_eq!(force_expect_i32(&rt.ap(i_comb, rt.i32(5)), &rt), 5);
 
         // K 5 6 = 5
-        assert_eq!(force_expect_i32(&ap(ap(k_comb.clone(), i32(5)), i32(6))), 5);
+        assert_eq!(force_expect_i32(&rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt), 5);
 
         // S K K x = x (S K K is identity)
-        let skk = ap(ap(s_comb, k_comb.clone()), k_comb); // k_comb used twice
-        assert_eq!(force_expect_i32(&ap(skk, i32(42))), 42);
+        let skk = rt.ap(rt.ap(s_comb, k_comb.clone()), k_comb);
+        assert_eq!(force_expect_i32(&rt.ap(skk, rt.i32(42)), &rt), 42);
     }
 
     // -------------------------------------------------------------------------
@@ -393,10 +375,11 @@ mod test {
     // -------------------------------------------------------------------------
     #[test]
     fn deep_currying_is_awkward() {
-        let _f = lambda(move |a| {
-            lambda(move |_b| {
-                let a = a.clone(); // This clone is needed for the next level.
-                lambda(move |_c| a.clone())
+        let rt = Runtime::new();
+        let _f = rt.lambda(move |a, rt| {
+            rt.lambda(move |_b, rt| {
+                let a = a.clone();
+                rt.lambda(move |_c, _rt| a.clone())
             })
         });
     }
@@ -408,17 +391,3 @@ mod test {
 // - `lambda` allocates a closure, not a function on the heap, it is a struct containing HeapPtrs to all referenced variables.
 // - Closures use Rc<dyn Fn> to enable cloning for memoization of shared values.
 // - `ap` does not call a function but allocates unevaluated object on the heap.
-//
-
-// What could we do next?
-// - Closure must be Rc<dyn Fn>, not Box. Box<dyn Fn> isn't Clone, but cloning is needed when
-//   memoizing shared values (e.g., identity returns its argument, which may be shared elsewhere).
-// - How to change enum Value to union Value? Rc is in a way. ManualDrop?
-// - We are verbose. How to write a macro that would synthesise the code for the lambdas, including the awkward clones.
-// - Runtime `force` has two recursive calls, so Rust stack is a part of the runtime.
-// - Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
-// - Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
-// - Would be very cool to have some runtime benchmarks and maybe compute number of allocations.
-// - Would be even cooler to use [Haskell's benchmarks](https://gitlab.haskell.org/ghc/ghc/-/wikis/building/running-tests/performance-tests)
-// - How could be print body of the lambdas? Abstract interpretation?
-// - It would be very interesting to have explicit weakening and contraction (instead of Rc?) and be closer to linear lambda calculus.
