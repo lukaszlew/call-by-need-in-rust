@@ -14,7 +14,7 @@ fn identity_preserves_sharing() {
     let rt = Runtime::new();
     let arg = rt.i32(42);
     let result = rt.ap(rt.lambda(|x, _rt| x), arg);
-    rt.force(result);
+    let _ = rt.get_i32(result); // force
     assert_eq!(rt.get_i32(arg).unwrap(), 42);
 }
 
@@ -142,15 +142,13 @@ fn deep_sharing() {
 fn force_is_idempotent() {
     let rt = Runtime::new();
     let val = rt.i32(42);
-    rt.force(val);
-    rt.force(val);
-    rt.force(val);
+    assert_eq!(rt.get_i32(val).unwrap(), 42);
+    assert_eq!(rt.get_i32(val).unwrap(), 42);
     assert_eq!(rt.get_i32(val).unwrap(), 42);
 
     let thunk = rt.ap(rt.lambda(|x, _rt| x), rt.i32(99));
-    rt.force(thunk);
-    rt.force(thunk);
-    rt.force(thunk);
+    assert_eq!(rt.get_i32(thunk).unwrap(), 99);
+    assert_eq!(rt.get_i32(thunk).unwrap(), 99);
     assert_eq!(rt.get_i32(thunk).unwrap(), 99);
 }
 

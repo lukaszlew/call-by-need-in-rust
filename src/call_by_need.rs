@@ -74,9 +74,10 @@ impl Runtime {
         self.objects.borrow_mut()[ptr.0] = obj;
     }
 
-    /// Extract i32 if this is a forced Value::I32.
+    /// Force and extract i32.
     #[must_use]
     pub fn get_i32(&self, ptr: HeapPtr) -> Option<i32> {
+        self.force(ptr);
         match self.get(ptr) {
             HeapObj::Value(Value::I32(n)) => Some(n),
             _ => None,
@@ -85,7 +86,7 @@ impl Runtime {
 
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
-    pub fn force(&self, ptr: HeapPtr) {
+    fn force(&self, ptr: HeapPtr) {
         let (f, arg) = match self.get(ptr) {
             HeapObj::App(f, arg) => (f, arg),
             HeapObj::Value(_) => return,
