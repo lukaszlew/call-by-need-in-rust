@@ -7,3 +7,6 @@ edition = "2021"
 path = "src/call_by_need.rs"
 
 [dependencies]
+
+[dev-dependencies]
+rstest = "0.23"

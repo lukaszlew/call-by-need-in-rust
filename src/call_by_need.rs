@@ -63,12 +63,7 @@ pub struct Runtime {
 
 impl Runtime {
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_mode(ForceMode::default())
-    }
-
-    #[must_use]
-    pub fn with_mode(mode: ForceMode) -> Self {
+    pub fn new(mode: ForceMode) -> Self {
         Runtime {
             objects: RefCell::new(Vec::new()),
             counter: Cell::new(0),
@@ -182,18 +177,13 @@ impl Runtime {
     }
 }
 
-impl Default for Runtime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Didactic tests: These tests demonstrate key concepts of call-by-need.
 // ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::{HeapPtr, Runtime};
+    use crate::{ForceMode, HeapPtr, Runtime};
+    use rstest::rstest;
 
     /// Create an increment function that ticks the counter when called.
     fn counted_inc(rt: &Runtime) -> HeapPtr {
@@ -214,9 +204,9 @@ mod test {
     // -------------------------------------------------------------------------
     // Basic application: (\x -> x) 5 = 5
     // -------------------------------------------------------------------------
-    #[test]
-    fn identity_applied() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn identity_applied(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         let t = rt.ap(rt.lambda(|x, _rt| x), rt.i32(5));
         assert_eq!(rt.get_i32(t), 5);
     }
@@ -224,9 +214,9 @@ mod test {
     // -------------------------------------------------------------------------
     // Primitive addition: plus 3 4 = 7
     // -------------------------------------------------------------------------
-    #[test]
-    fn plus_primitive() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn plus_primitive(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         assert_eq!(rt.get_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4))), 7);
     }
 
@@ -234,9 +224,9 @@ mod test {
     // Currying: fst and snd projections.
     // fst = \x.\y.x    snd = \x.\y.y
     // -------------------------------------------------------------------------
-    #[test]
-    fn fst_and_snd() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn fst_and_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         let fst = rt.lambda(move |x, rt| rt.lambda(move |_y, _rt| x.clone()));
         let snd = rt.lambda(move |_x, rt| rt.lambda(move |y, _rt| y.clone()));
 
@@ -248,9 +238,11 @@ mod test {
     // Laziness: unused arguments are never evaluated.
     // const 42 expensive = 42, and expensive is never called.
     // -------------------------------------------------------------------------
-    #[test]
-    fn unused_argument_not_evaluated() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn unused_argument_not_evaluated(
+        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+    ) {
+        let rt = Runtime::new(mode);
         let expensive = counted_const(&rt, 999);
 
         // const = \x.\y. x (ignores second argument)
@@ -267,9 +259,9 @@ mod test {
     // Memoization: forcing twice doesn't re-evaluate.
     // inc_twice 10 = 12, and inc is called exactly twice (not four times).
     // -------------------------------------------------------------------------
-    #[test]
-    fn verify_call_by_need() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn verify_call_by_need(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         let inc = counted_inc(&rt);
 
         // inc_twice = \n. inc (inc n)
@@ -287,9 +279,11 @@ mod test {
     // Sharing: a thunk used twice is evaluated only once.
     // add thunk thunk = 2, but thunk's closure runs once.
     // -------------------------------------------------------------------------
-    #[test]
-    fn shared_thunk_evaluated_once() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn shared_thunk_evaluated_once(
+        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+    ) {
+        let rt = Runtime::new(mode);
         let expensive = counted_const(&rt, 1);
         let thunk = rt.ap(expensive, rt.i32(0));
 
@@ -306,9 +300,9 @@ mod test {
     // zero = \f.\x. x
     // succ = \n.\f.\x. f (n f x)
     // -------------------------------------------------------------------------
-    #[test]
-    fn church_numerals() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn church_numerals(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         let zero = rt.lambda(|_f, rt| rt.lambda(|x, _rt| x));
 
         let succ = rt.lambda(|n, rt| {
@@ -344,9 +338,9 @@ mod test {
     // S = \x.\y.\z. x z (y z)
     // Notably: S K K = I
     // -------------------------------------------------------------------------
-    #[test]
-    fn ski_combinators() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn ski_combinators(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
         let i_comb = rt.lambda(|x, _rt| x);
         let k_comb = rt.lambda(|x, rt| rt.lambda(move |_y, _rt| x.clone()));
         let s_comb = rt.lambda(|x, rt| {
@@ -380,9 +374,11 @@ mod test {
     // Deep currying is awkward in Rust due to manual cloning.
     // f = \a.\b.\c. a
     // -------------------------------------------------------------------------
-    #[test]
-    fn deep_currying_is_awkward() {
-        let rt = Runtime::new();
+    #[rstest]
+    fn deep_currying_is_awkward(
+        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+    ) {
+        let rt = Runtime::new(mode);
         let _f = rt.lambda(move |a, rt| {
             rt.lambda(move |_b, rt| {
                 let a = a.clone();

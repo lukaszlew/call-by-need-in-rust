@@ -3,15 +3,18 @@
 
 mod common;
 
-use call_by_need_in_rust::Runtime;
+use call_by_need_in_rust::{ForceMode, Runtime};
 use common::{add, counted_const, counted_inc};
+use rstest::rstest;
 use std::cell::Cell;
 use std::rc::Rc;
 
 // Test that identity doesn't corrupt shared arguments.
-#[test]
-fn identity_preserves_sharing() {
-    let rt = Runtime::new();
+#[rstest]
+fn identity_preserves_sharing(
+    #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+) {
+    let rt = Runtime::new(mode);
     let arg = rt.i32(42);
     let result = rt.ap(rt.lambda(|x, _rt| x), arg);
     let _ = rt.get_i32(result); // force
@@ -20,9 +23,9 @@ fn identity_preserves_sharing() {
 
 // Diamond dependency: result depends on left and right, both depend on shared base.
 // base should be evaluated only once.
-#[test]
-fn diamond_sharing() {
-    let rt = Runtime::new();
+#[rstest]
+fn diamond_sharing(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    let rt = Runtime::new(mode);
     let inc = counted_inc(&rt);
 
     // base = inc 10 (shared)
@@ -44,9 +47,9 @@ fn diamond_sharing() {
 
 // Nested thunks: outer thunk contains inner thunk, both memoized correctly.
 // Uses separate counters to verify each function called exactly once.
-#[test]
-fn nested_thunks() {
-    let rt = Runtime::new();
+#[rstest]
+fn nested_thunks(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    let rt = Runtime::new(mode);
     let outer_count = Rc::new(Cell::new(0));
     let inner_count = Rc::new(Cell::new(0));
 
@@ -76,9 +79,11 @@ fn nested_thunks() {
 
 // Partial application creates shared closure.
 // Uses separate counter to track outer lambda only.
-#[test]
-fn partial_application_sharing() {
-    let rt = Runtime::new();
+#[rstest]
+fn partial_application_sharing(
+    #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+) {
+    let rt = Runtime::new(mode);
     let c = Rc::new(Cell::new(0));
 
     // add = \x.\y. x + y (but tracks when outer lambda is called)
@@ -105,9 +110,9 @@ fn partial_application_sharing() {
 }
 
 // Multiple levels of sharing.
-#[test]
-fn deep_sharing() {
-    let rt = Runtime::new();
+#[rstest]
+fn deep_sharing(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    let rt = Runtime::new(mode);
     let inc = counted_inc(&rt);
     let inc2 = counted_inc(&rt);
     let inc3 = counted_inc(&rt);
@@ -136,9 +141,9 @@ fn deep_sharing() {
 }
 
 // Verify that forcing a value multiple times is idempotent.
-#[test]
-fn force_is_idempotent() {
-    let rt = Runtime::new();
+#[rstest]
+fn force_is_idempotent(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    let rt = Runtime::new(mode);
     let val = rt.i32(42);
     assert_eq!(rt.get_i32(val), 42);
     assert_eq!(rt.get_i32(val), 42);
@@ -151,9 +156,11 @@ fn force_is_idempotent() {
 }
 
 // Test closure that captures and uses multiple variables.
-#[test]
-fn closure_captures_multiple() {
-    let rt = Runtime::new();
+#[rstest]
+fn closure_captures_multiple(
+    #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+) {
+    let rt = Runtime::new(mode);
 
     let a = rt.ap(counted_const(&rt, 10), rt.i32(0));
     let b = rt.ap(counted_const(&rt, 20), rt.i32(0));
