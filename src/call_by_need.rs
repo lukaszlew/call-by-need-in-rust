@@ -3,27 +3,31 @@ use std::rc::Rc;
 
 use std::cell::{Cell, RefCell};
 
-// Value enum makes it easier to add more types to the calculus.
-// Right now we have just Closures and i32.
-// If our calculus was typed, we could use union instead of enum, since we would always know which enum case it is.
-#[derive(Clone)]
-enum Value {
-    I32(i32),
-    Closure(Closure),
-}
-
-// HeapObj represents unevaluated (App) or evaluated lambda calculus terms.
-// When in heap memory, HeapObj will be in RefCell and can be mutated in place when the terms are evaluated.
-// Evaluation transmutes App into Value.
+// HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
+// Evaluation transmutes App into I32 or Closure.
 //
-// HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
-// HeapObj::Value(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
-// I'm not sure what is the i32 representation. Maybe CONSTR?
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 enum HeapObj {
     App(HeapPtr, HeapPtr),
-    Value(Value),
+    I32(i32),
+    Closure(Closure),
+}
+
+impl HeapObj {
+    fn unwrap_i32(self) -> i32 {
+        match self {
+            HeapObj::I32(n) => n,
+            _ => panic!("expected i32"),
+        }
+    }
+
+    fn unwrap_closure(self) -> Closure {
+        match self {
+            HeapObj::Closure(c) => c,
+            _ => panic!("expected closure"),
+        }
+    }
 }
 
 // HeapPtr is an index into Runtime's heap.
@@ -69,19 +73,7 @@ impl Runtime {
     /// Force and extract i32.
     #[must_use]
     pub fn get_i32(&self, ptr: HeapPtr) -> i32 {
-        match self.force(ptr) {
-            HeapObj::Value(Value::I32(n)) => n,
-            _ => panic!("expected i32"),
-        }
-    }
-
-    /// Force and extract closure.
-    #[must_use]
-    fn get_closure(&self, ptr: HeapPtr) -> Closure {
-        match self.force(ptr) {
-            HeapObj::Value(Value::Closure(c)) => c,
-            _ => panic!("expected closure"),
-        }
+        self.force(ptr).unwrap_i32()
     }
 
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
@@ -89,15 +81,15 @@ impl Runtime {
     fn force(&self, ptr: HeapPtr) -> HeapObj {
         let obj = self.objects.borrow()[ptr.0].clone();
         match obj {
-            v @ HeapObj::Value(_) => v,
             HeapObj::App(f, arg) => {
-                let closure = self.get_closure(f);
+                let closure = self.force(f).unwrap_closure();
                 let result = self.force(closure(arg, self));
                 // We clone the result HeapObj into ptr's slot. GHC uses indirection nodes
                 // instead to avoid cloning, but that adds complexity. With Rc, cloning is cheap.
                 self.objects.borrow_mut()[ptr.0] = result.clone();
                 result
             }
+            v => v, // already evaluated
         }
     }
 
@@ -115,13 +107,13 @@ impl Runtime {
     /// Create HeapPtr for the given Rust closure.
     #[must_use]
     pub fn lambda(&self, f: impl Fn(HeapPtr, &Runtime) -> HeapPtr + 'static) -> HeapPtr {
-        self.alloc(HeapObj::Value(Value::Closure(Rc::new(f))))
+        self.alloc(HeapObj::Closure(Rc::new(f)))
     }
 
     /// Create HeapPtr for i32.
     #[must_use]
     pub fn i32(&self, n: i32) -> HeapPtr {
-        self.alloc(HeapObj::Value(Value::I32(n)))
+        self.alloc(HeapObj::I32(n))
     }
 
     /// Allocate unevaluated lambda application.
