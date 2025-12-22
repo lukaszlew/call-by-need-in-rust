@@ -27,22 +27,9 @@ enum HeapObj {
     Value(Value),
 }
 
-// HeapObj is to be allocated on our "heap" and the memory is managed through reference counting.
-// We do nothing about cycles.
-// Thanks to the use of RefCell, when any HeapPtr forces evaluation of HeapObj, all of them will see the change.
-// This allows implementation of sharing and call-by-need.
-#[derive(Clone)]
-pub struct HeapPtr {
-    rc: Rc<RefCell<HeapObj>>,
-}
-
-impl HeapPtr {
-    fn new(obj: HeapObj) -> Self {
-        HeapPtr {
-            rc: Rc::new(RefCell::new(obj)),
-        }
-    }
-}
+// HeapPtr is an index into Runtime's heap.
+#[derive(Clone, Copy)]
+pub struct HeapPtr(usize);
 
 // Finally we learn that Closure is an ordinary Rust closure.
 // Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
@@ -54,63 +41,52 @@ type Closure = Rc<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>;
 // Runtime
 // =============================================================================
 
-/// Runtime for the lambda calculus. Will hold the heap in the future.
+/// Runtime for the lambda calculus with explicit heap.
 pub struct Runtime {
-    // Empty for now - heap will be added here
+    objects: RefCell<Vec<HeapObj>>,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new() -> Self {
-        Runtime {}
+        Runtime { objects: RefCell::new(Vec::new()) }
     }
 
-    // -------------------------------------------------------------------------
-    // Heap access (will change when heap moves into Runtime)
-    // -------------------------------------------------------------------------
-
-    fn get(&self, ptr: &HeapPtr) -> HeapObj {
-        ptr.rc.borrow().clone()
+    fn get(&self, ptr: HeapPtr) -> HeapObj {
+        self.objects.borrow()[ptr.0].clone()
     }
 
-    fn set(&self, ptr: &HeapPtr, obj: HeapObj) {
-        *ptr.rc.borrow_mut() = obj;
+    fn set(&self, ptr: HeapPtr, obj: HeapObj) {
+        self.objects.borrow_mut()[ptr.0] = obj;
     }
 
     /// Extract i32 if this is a forced Value::I32.
     #[must_use]
-    pub fn get_i32(&self, ptr: &HeapPtr) -> Option<i32> {
-        match &*ptr.rc.borrow() {
-            HeapObj::Value(Value::I32(n)) => Some(*n),
+    pub fn get_i32(&self, ptr: HeapPtr) -> Option<i32> {
+        match self.get(ptr) {
+            HeapObj::Value(Value::I32(n)) => Some(n),
             _ => None,
         }
     }
 
-    // This function implements the core of lazy call-by-need evaluation.
-    // If HeapObj::Value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
-    // - we force f first,
-    // - we assume that f is now a Closure, (i32 would be a 'type' error),
-    // - we apply the closure to the (unforced) argument,
-    // - we continue forcing (the result) until we get a value,
-    // - and finally we overwrite App(f, arg) in-place with the result.
-    // At this point the result (i32 or closure) can be inspected.
-    pub fn force(&self, ptr: &HeapPtr) {
-        // Extract t1, t2 if this is an App, otherwise return early.
-        let (t1, t2) = match &*ptr.rc.borrow() {
-            HeapObj::App(t1, t2) => (t1.clone(), t2.clone()),
+    // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
+    // forcing the result, and caching the result in place of the App.
+    pub fn force(&self, ptr: HeapPtr) {
+        let (f, arg) = match self.get(ptr) {
+            HeapObj::App(f, arg) => (f, arg),
             HeapObj::Value(_) => return,
         };
 
-        self.force(&t1);
+        self.force(f);
 
-        // Borrow t1 to call its closure - no need to clone the closure itself.
-        let new_ptr = match &*t1.rc.borrow() {
-            HeapObj::Value(Value::Closure(closure)) => closure(t2, self),
-            _ => panic!("expected closure after forcing"),
+        let closure = match self.get(f) {
+            HeapObj::Value(Value::Closure(c)) => c,
+            _ => panic!("expected closure"),
         };
 
-        self.force(&new_ptr);
-        self.set(ptr, self.get(&new_ptr));
+        let result = closure(arg, self);
+        self.force(result);
+        self.set(ptr, self.get(result));
     }
 
     // -------------------------------------------------------------------------
@@ -118,7 +94,10 @@ impl Runtime {
     // -------------------------------------------------------------------------
 
     fn alloc(&self, obj: HeapObj) -> HeapPtr {
-        HeapPtr::new(obj)
+        let mut objects = self.objects.borrow_mut();
+        let ptr = HeapPtr(objects.len());
+        objects.push(obj);
+        ptr
     }
 
     /// Create HeapPtr for the given Rust closure.
@@ -144,8 +123,7 @@ impl Runtime {
     pub fn plus(&self) -> HeapPtr {
         self.lambda(|a, rt| {
             rt.lambda(move |b, rt| {
-                let a = a.clone();
-                rt.i32(force_expect_i32(&a, rt) + force_expect_i32(&b, rt))
+                rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt))
             })
         })
     }
@@ -159,7 +137,7 @@ impl Default for Runtime {
 
 /// Helper for tests: force and extract i32.
 #[must_use]
-pub fn force_expect_i32(ptr: &HeapPtr, rt: &Runtime) -> i32 {
+pub fn force_expect_i32(ptr: HeapPtr, rt: &Runtime) -> i32 {
     rt.force(ptr);
     rt.get_i32(ptr).unwrap()
 }
@@ -185,7 +163,7 @@ mod test {
         let c = c.clone();
         rt.lambda(move |x, rt| {
             c.set(c.get() + 1);
-            rt.i32(force_expect_i32(&x, rt) + 1)
+            rt.i32(force_expect_i32(x, rt) + 1)
         })
     }
 
@@ -205,7 +183,7 @@ mod test {
     fn identity_applied() {
         let rt = Runtime::new();
         let t = rt.ap(rt.lambda(|x, _rt| x), rt.i32(5));
-        assert_eq!(force_expect_i32(&t, &rt), 5);
+        assert_eq!(force_expect_i32(t, &rt), 5);
     }
 
     // -------------------------------------------------------------------------
@@ -214,7 +192,7 @@ mod test {
     #[test]
     fn plus_primitive() {
         let rt = Runtime::new();
-        assert_eq!(force_expect_i32(&rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt), 7);
+        assert_eq!(force_expect_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt), 7);
     }
 
     // -------------------------------------------------------------------------
@@ -231,8 +209,8 @@ mod test {
             rt.lambda(move |y, _rt| y.clone())
         });
 
-        assert_eq!(force_expect_i32(&rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt), 5);
-        assert_eq!(force_expect_i32(&rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt), 6);
+        assert_eq!(force_expect_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt), 5);
+        assert_eq!(force_expect_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -253,7 +231,7 @@ mod test {
         let unused_thunk = rt.ap(expensive, rt.i32(0));
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
 
-        assert_eq!(force_expect_i32(&result, &rt), 42);
+        assert_eq!(force_expect_i32(result, &rt), 42);
         assert_eq!(c.get(), 0); // expensive was never called!
     }
 
@@ -274,9 +252,9 @@ mod test {
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
         assert_eq!(c.get(), 0);
-        assert_eq!(force_expect_i32(&hopefully_12, &rt), 12);
+        assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
         assert_eq!(c.get(), 2);
-        assert_eq!(force_expect_i32(&hopefully_12, &rt), 12);
+        assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
         assert_eq!(c.get(), 2); // Still 2! Memoization works.
     }
 
@@ -295,7 +273,7 @@ mod test {
         let result = rt.ap(rt.ap(rt.plus(), thunk.clone()), thunk);
 
         assert_eq!(c.get(), 0);
-        assert_eq!(force_expect_i32(&result, &rt), 2);
+        assert_eq!(force_expect_i32(result, &rt), 2);
         assert_eq!(c.get(), 1); // Called once, not twice!
     }
 
@@ -324,10 +302,10 @@ mod test {
 
         // Convert church numeral to i32: apply n to inc and 0
         let inc = rt.lambda(|x, rt| {
-            rt.i32(force_expect_i32(&x, rt) + 1)
+            rt.i32(force_expect_i32(x, rt) + 1)
         });
         let to_int = |n: &HeapPtr| -> i32 {
-            force_expect_i32(&rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)), &rt)
+            force_expect_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)), &rt)
         };
 
         let one = rt.ap(succ.clone(), zero.clone());
@@ -368,14 +346,14 @@ mod test {
         });
 
         // I 5 = 5
-        assert_eq!(force_expect_i32(&rt.ap(i_comb, rt.i32(5)), &rt), 5);
+        assert_eq!(force_expect_i32(rt.ap(i_comb, rt.i32(5)), &rt), 5);
 
         // K 5 6 = 5
-        assert_eq!(force_expect_i32(&rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt), 5);
+        assert_eq!(force_expect_i32(rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt), 5);
 
         // S K K x = x (S K K is identity)
         let skk = rt.ap(rt.ap(s_comb, k_comb.clone()), k_comb);
-        assert_eq!(force_expect_i32(&rt.ap(skk, rt.i32(42)), &rt), 42);
+        assert_eq!(force_expect_i32(rt.ap(skk, rt.i32(42)), &rt), 42);
     }
 
     // -------------------------------------------------------------------------

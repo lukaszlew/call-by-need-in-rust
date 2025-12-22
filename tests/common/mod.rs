@@ -16,7 +16,7 @@ pub fn counted_inc(rt: &Runtime, c: &Counter) -> HeapPtr {
     let c = c.clone();
     rt.lambda(move |x, rt| {
         c.set(c.get() + 1);
-        rt.i32(force_expect_i32(&x, rt) + 1)
+        rt.i32(force_expect_i32(x, rt) + 1)
     })
 }
 

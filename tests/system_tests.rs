@@ -12,8 +12,8 @@ fn identity_preserves_sharing() {
     let rt = Runtime::new();
     let arg = rt.i32(42);
     let result = rt.ap(rt.lambda(|x, _rt| x), arg.clone());
-    rt.force(&result);
-    assert_eq!(rt.get_i32(&arg).unwrap(), 42);
+    rt.force(result);
+    assert_eq!(rt.get_i32(arg).unwrap(), 42);
 }
 
 // Diamond dependency: result depends on left and right, both depend on shared base.
@@ -34,7 +34,7 @@ fn diamond_sharing() {
     let result = rt.ap(rt.ap(add(&rt), left), right);
 
     assert_eq!(c.get(), 0);
-    assert_eq!(force_expect_i32(&result, &rt), 24);
+    assert_eq!(force_expect_i32(result, &rt), 24);
     // inc called 3 times: once for base, once for left, once for right
     assert_eq!(c.get(), 3);
 }
@@ -49,7 +49,7 @@ fn nested_thunks() {
     let ic = inner_count.clone();
     let inner_fn = rt.lambda(move |x, rt| {
         ic.set(ic.get() + 1);
-        rt.i32(force_expect_i32(&x, rt) * 2)
+        rt.i32(force_expect_i32(x, rt) * 2)
     });
 
     let oc = outer_count.clone();
@@ -61,9 +61,9 @@ fn nested_thunks() {
     let thunk = rt.ap(outer_fn, rt.i32(5));
 
     // Force multiple times
-    assert_eq!(force_expect_i32(&thunk, &rt), 10);
-    assert_eq!(force_expect_i32(&thunk, &rt), 10);
-    assert_eq!(force_expect_i32(&thunk, &rt), 10);
+    assert_eq!(force_expect_i32(thunk, &rt), 10);
+    assert_eq!(force_expect_i32(thunk, &rt), 10);
+    assert_eq!(force_expect_i32(thunk, &rt), 10);
 
     // Each function called exactly once
     assert_eq!(outer_count.get(), 1);
@@ -82,7 +82,7 @@ fn partial_application_sharing() {
         cc.set(cc.get() + 1);
         rt.lambda(move |y, rt| {
             let x = x.clone();
-            rt.i32(force_expect_i32(&x, rt) + force_expect_i32(&y, rt))
+            rt.i32(force_expect_i32(x, rt) + force_expect_i32(y, rt))
         })
     });
 
@@ -94,10 +94,10 @@ fn partial_application_sharing() {
     let r2 = rt.ap(add5, rt.i32(20));
 
     assert_eq!(c.get(), 0);
-    assert_eq!(force_expect_i32(&r1, &rt), 15);
+    assert_eq!(force_expect_i32(r1, &rt), 15);
     // add's outer lambda called once to produce the closure
     assert_eq!(c.get(), 1);
-    assert_eq!(force_expect_i32(&r2, &rt), 25);
+    assert_eq!(force_expect_i32(r2, &rt), 25);
     // Still 1 - add5 thunk was already forced, closure is shared
     assert_eq!(c.get(), 1);
 }
@@ -123,7 +123,7 @@ fn deep_sharing() {
     let result = rt.ap(rt.ap(add_fn, aabb), cc);
 
     assert_eq!(c.get(), 0);
-    assert_eq!(force_expect_i32(&result, &rt), 2 + 4 + 6); // 12
+    assert_eq!(force_expect_i32(result, &rt), 2 + 4 + 6); // 12
     // inc called exactly 3 times (once for a, once for b, once for c)
     assert_eq!(c.get(), 3);
 }
@@ -133,16 +133,16 @@ fn deep_sharing() {
 fn force_is_idempotent() {
     let rt = Runtime::new();
     let val = rt.i32(42);
-    rt.force(&val);
-    rt.force(&val);
-    rt.force(&val);
-    assert_eq!(rt.get_i32(&val).unwrap(), 42);
+    rt.force(val);
+    rt.force(val);
+    rt.force(val);
+    assert_eq!(rt.get_i32(val).unwrap(), 42);
 
     let thunk = rt.ap(rt.lambda(|x, _rt| x), rt.i32(99));
-    rt.force(&thunk);
-    rt.force(&thunk);
-    rt.force(&thunk);
-    assert_eq!(rt.get_i32(&thunk).unwrap(), 99);
+    rt.force(thunk);
+    rt.force(thunk);
+    rt.force(thunk);
+    assert_eq!(rt.get_i32(thunk).unwrap(), 99);
 }
 
 // Test closure that captures and uses multiple variables.
@@ -160,16 +160,16 @@ fn closure_captures_multiple() {
         let a = a.clone();
         let b = b.clone();
         let c_thunk = c_thunk.clone();
-        rt.i32(force_expect_i32(&a, rt) + force_expect_i32(&b, rt) + force_expect_i32(&c_thunk, rt))
+        rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt) + force_expect_i32(c_thunk, rt))
     });
 
     let result = rt.ap(sum_abc, rt.i32(0));
 
     assert_eq!(c.get(), 0);
-    assert_eq!(force_expect_i32(&result, &rt), 60);
+    assert_eq!(force_expect_i32(result, &rt), 60);
     assert_eq!(c.get(), 3);
 
     // Force again - should not re-evaluate
-    assert_eq!(force_expect_i32(&result, &rt), 60);
+    assert_eq!(force_expect_i32(result, &rt), 60);
     assert_eq!(c.get(), 3);
 }
