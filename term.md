@@ -37,13 +37,14 @@ struct TermClosure {
 
 ## Integration
 
-Extend existing `Value` enum:
+Extend existing `HeapObj` enum:
 
 ```rust
-enum Value {
+enum HeapObj {
+    App(HeapPtr, HeapPtr),
     I32(i32),
-    Closure(Rc<dyn Fn(HeapPtr) -> HeapPtr>),  // HOAS
-    TermClosure(TermClosure),                  // FOAS
+    Closure(Closure),        // HOAS (fn pointer + explicit env)
+    TermClosure(TermClosure), // FOAS
 }
 ```
 
