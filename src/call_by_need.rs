@@ -76,18 +76,20 @@ impl Runtime {
 
     /// Force and extract i32.
     #[must_use]
-    pub fn get_i32(&self, ptr: HeapPtr) -> Option<i32> {
+    pub fn get_i32(&self, ptr: HeapPtr) -> i32 {
         self.force(ptr);
         match self.get_obj(ptr) {
-            HeapObj::Value(Value::I32(n)) => Some(n),
-            _ => None,
+            HeapObj::Value(Value::I32(n)) => n,
+            _ => panic!("expected i32"),
         }
     }
 
-    fn get_closure(&self, ptr: HeapPtr) -> Option<Closure> {
+    /// Force and extract closure.
+    fn get_closure(&self, ptr: HeapPtr) -> Closure {
+        self.force(ptr);
         match self.get_obj(ptr) {
-            HeapObj::Value(Value::Closure(c)) => Some(c),
-            _ => None,
+            HeapObj::Value(Value::Closure(c)) => c,
+            _ => panic!("expected closure"),
         }
     }
 
@@ -99,11 +101,12 @@ impl Runtime {
             HeapObj::Value(_) => return,
         };
 
-        self.force(f);
-        let closure = self.get_closure(f).expect("expected closure");
+        let closure = self.get_closure(f); // forces f
 
         let result = closure(arg, self);
         self.force(result);
+        // We clone the result HeapObj into ptr's slot. GHC uses indirection nodes instead
+        // to avoid cloning, but that adds complexity. With Rc closures, cloning is cheap.
         self.set_obj(ptr, self.get_obj(result));
     }
 
@@ -139,9 +142,7 @@ impl Runtime {
     /// plus = \a.\b. a + b (primitive addition for i32)
     #[must_use]
     pub fn plus(&self) -> HeapPtr {
-        self.lambda(|a, rt| {
-            rt.lambda(move |b, rt| rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt)))
-        })
+        self.lambda(|a, rt| rt.lambda(move |b, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b))))
     }
 }
 
@@ -151,25 +152,18 @@ impl Default for Runtime {
     }
 }
 
-/// Helper for tests: force and extract i32.
-#[must_use]
-pub fn force_expect_i32(ptr: HeapPtr, rt: &Runtime) -> i32 {
-    rt.force(ptr);
-    rt.get_i32(ptr).unwrap()
-}
-
 // ============================================================================
 // Didactic tests: These tests demonstrate key concepts of call-by-need.
 // ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::{force_expect_i32, HeapPtr, Runtime};
+    use crate::{HeapPtr, Runtime};
 
     /// Create an increment function that ticks the counter when called.
     fn counted_inc(rt: &Runtime) -> HeapPtr {
         rt.lambda(move |x, rt| {
             rt.tick();
-            rt.i32(force_expect_i32(x, rt) + 1)
+            rt.i32(rt.get_i32(x) + 1)
         })
     }
 
@@ -188,7 +182,7 @@ mod test {
     fn identity_applied() {
         let rt = Runtime::new();
         let t = rt.ap(rt.lambda(|x, _rt| x), rt.i32(5));
-        assert_eq!(force_expect_i32(t, &rt), 5);
+        assert_eq!(rt.get_i32(t), 5);
     }
 
     // -------------------------------------------------------------------------
@@ -198,7 +192,7 @@ mod test {
     fn plus_primitive() {
         let rt = Runtime::new();
         assert_eq!(
-            force_expect_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt),
+            rt.get_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4))),
             7
         );
     }
@@ -214,11 +208,11 @@ mod test {
         let snd = rt.lambda(move |_x, rt| rt.lambda(move |y, _rt| y.clone()));
 
         assert_eq!(
-            force_expect_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt),
+            rt.get_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6))),
             5
         );
         assert_eq!(
-            force_expect_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt),
+            rt.get_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6))),
             6
         );
     }
@@ -238,7 +232,7 @@ mod test {
         let unused_thunk = rt.ap(expensive, rt.i32(0));
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
 
-        assert_eq!(force_expect_i32(result, &rt), 42);
+        assert_eq!(rt.get_i32(result), 42);
         assert_eq!(rt.count(), 0); // expensive was never called!
     }
 
@@ -256,9 +250,9 @@ mod test {
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
         assert_eq!(rt.count(), 0);
-        assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
+        assert_eq!(rt.get_i32(hopefully_12), 12);
         assert_eq!(rt.count(), 2);
-        assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
+        assert_eq!(rt.get_i32(hopefully_12), 12);
         assert_eq!(rt.count(), 2); // Still 2! Memoization works.
     }
 
@@ -276,7 +270,7 @@ mod test {
         let result = rt.ap(rt.ap(rt.plus(), thunk), thunk);
 
         assert_eq!(rt.count(), 0);
-        assert_eq!(force_expect_i32(result, &rt), 2);
+        assert_eq!(rt.get_i32(result), 2);
         assert_eq!(rt.count(), 1); // Called once, not twice!
     }
 
@@ -302,9 +296,9 @@ mod test {
         });
 
         // Convert church numeral to i32: apply n to inc and 0
-        let inc = rt.lambda(|x, rt| rt.i32(force_expect_i32(x, rt) + 1));
+        let inc = rt.lambda(|x, rt| rt.i32(rt.get_i32(x) + 1));
         let to_int = |n: &HeapPtr| -> i32 {
-            force_expect_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)), &rt)
+            rt.get_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)))
         };
 
         let one = rt.ap(succ.clone(), zero.clone());
@@ -343,17 +337,17 @@ mod test {
         });
 
         // I 5 = 5
-        assert_eq!(force_expect_i32(rt.ap(i_comb, rt.i32(5)), &rt), 5);
+        assert_eq!(rt.get_i32(rt.ap(i_comb, rt.i32(5))), 5);
 
         // K 5 6 = 5
         assert_eq!(
-            force_expect_i32(rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt),
+            rt.get_i32(rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6))),
             5
         );
 
         // S K K x = x (S K K is identity)
         let skk = rt.ap(rt.ap(s_comb, k_comb.clone()), k_comb);
-        assert_eq!(force_expect_i32(rt.ap(skk, rt.i32(42)), &rt), 42);
+        assert_eq!(rt.get_i32(rt.ap(skk, rt.i32(42))), 42);
     }
 
     // -------------------------------------------------------------------------

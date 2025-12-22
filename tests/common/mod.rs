@@ -1,12 +1,12 @@
 //! Shared test utilities for call-by-need tests.
 
-use call_by_need_in_rust::{force_expect_i32, HeapPtr, Runtime};
+use call_by_need_in_rust::{HeapPtr, Runtime};
 
 /// Create an increment function that ticks the counter when called.
 pub fn counted_inc(rt: &Runtime) -> HeapPtr {
     rt.lambda(move |x, rt| {
         rt.tick();
-        rt.i32(force_expect_i32(x, rt) + 1)
+        rt.i32(rt.get_i32(x) + 1)
     })
 }
 
