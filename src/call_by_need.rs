@@ -42,11 +42,14 @@ pub enum ForceMode {
     Iterative,
 }
 
-// Finally we learn that Closure is an ordinary Rust closure.
-// Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
-// We use Rc because closures need to be cloneable (for memoization when values are shared).
-// Closures take both the argument and a reference to Runtime for allocation.
-type Closure = Rc<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>;
+// Closure with explicit environment.
+// - env: captured HeapPtrs, explicit instead of relying on Rust's move captures
+// - code: the closure body, receives (&env, arg, runtime)
+#[derive(Clone)]
+struct Closure {
+    env: Vec<HeapPtr>,
+    code: Rc<dyn Fn(&[HeapPtr], HeapPtr, &Runtime) -> HeapPtr>,
+}
 
 // =============================================================================
 // Runtime
@@ -102,7 +105,7 @@ impl Runtime {
         match obj {
             HeapObj::App(f, arg) => {
                 let closure = self.force(f).unwrap_closure();
-                let result = self.force(closure(arg, self));
+                let result = self.force((closure.code)(&closure.env, arg, self));
                 self.objects.borrow_mut()[ptr.0] = result.clone();
                 result
             }
@@ -134,7 +137,8 @@ impl Runtime {
                         ptr = thunk;
                     }
                     Some(Frame::Apply(arg)) => {
-                        ptr = value.unwrap_closure()(arg, self);
+                        let closure = value.unwrap_closure();
+                        ptr = (closure.code)(&closure.env, arg, self);
                     }
                 },
             }
@@ -152,10 +156,21 @@ impl Runtime {
         ptr
     }
 
-    /// Create HeapPtr for the given Rust closure.
+    /// Create HeapPtr for the given Rust closure with explicit environment.
+    /// Environment is passed as array for ergonomic pattern matching.
     #[must_use]
-    pub fn lambda(&self, f: impl Fn(HeapPtr, &Runtime) -> HeapPtr + 'static) -> HeapPtr {
-        self.alloc(HeapObj::Closure(Rc::new(f)))
+    pub fn lambda<const N: usize>(
+        &self,
+        env: [HeapPtr; N],
+        f: impl Fn([HeapPtr; N], HeapPtr, &Runtime) -> HeapPtr + 'static,
+    ) -> HeapPtr {
+        self.alloc(HeapObj::Closure(Closure {
+            env: env.to_vec(),
+            code: Rc::new(move |env_slice, arg, rt| {
+                let arr: [HeapPtr; N] = env_slice.try_into().unwrap();
+                f(arr, arg, rt)
+            }),
+        }))
     }
 
     /// Create HeapPtr for i32.
@@ -173,7 +188,9 @@ impl Runtime {
     /// plus = \a.\b. a + b (primitive addition for i32)
     #[must_use]
     pub fn plus(&self) -> HeapPtr {
-        self.lambda(|a, rt| rt.lambda(move |b, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b))))
+        self.lambda([], |[], a, rt| {
+            rt.lambda([a], |[a], b, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b)))
+        })
     }
 }
 
@@ -187,7 +204,7 @@ mod test {
 
     /// Create an increment function that ticks the counter when called.
     fn counted_inc(rt: &Runtime) -> HeapPtr {
-        rt.lambda(move |x, rt| {
+        rt.lambda([], move |[], x, rt| {
             rt.tick();
             rt.i32(rt.get_i32(x) + 1)
         })
@@ -195,7 +212,7 @@ mod test {
 
     /// Create a thunk that returns `val` and ticks the counter when forced.
     fn counted_const(rt: &Runtime, val: i32) -> HeapPtr {
-        rt.lambda(move |_, rt| {
+        rt.lambda([], move |[], _, rt| {
             rt.tick();
             rt.i32(val)
         })
@@ -207,7 +224,7 @@ mod test {
     #[rstest]
     fn identity_applied(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let t = rt.ap(rt.lambda(|x, _rt| x), rt.i32(5));
+        let t = rt.ap(rt.lambda([], |[], x, _rt| x), rt.i32(5));
         assert_eq!(rt.get_i32(t), 5);
     }
 
@@ -227,8 +244,8 @@ mod test {
     #[rstest]
     fn fst_and_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let fst = rt.lambda(move |x, rt| rt.lambda(move |_y, _rt| x.clone()));
-        let snd = rt.lambda(move |_x, rt| rt.lambda(move |y, _rt| y.clone()));
+        let fst = rt.lambda([], |[], x, rt| rt.lambda([x], |[x], _y, _rt| x));
+        let snd = rt.lambda([], |[], _x, rt| rt.lambda([], |[], y, _rt| y));
 
         assert_eq!(rt.get_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6))), 5);
         assert_eq!(rt.get_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6))), 6);
@@ -246,7 +263,7 @@ mod test {
         let expensive = counted_const(&rt, 999);
 
         // const = \x.\y. x (ignores second argument)
-        let const_fn = rt.lambda(|x, rt| rt.lambda(move |_y, _rt| x.clone()));
+        let const_fn = rt.lambda([], |[], x, rt| rt.lambda([x], |[x], _y, _rt| x));
 
         let unused_thunk = rt.ap(expensive, rt.i32(0));
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
@@ -265,7 +282,7 @@ mod test {
         let inc = counted_inc(&rt);
 
         // inc_twice = \n. inc (inc n)
-        let inc_twice = rt.lambda(move |n, rt| rt.ap(inc, rt.ap(inc, n)));
+        let inc_twice = rt.lambda([inc], |[inc], n, rt| rt.ap(inc, rt.ap(inc, n)));
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
         assert_eq!(rt.count(), 0);
@@ -303,21 +320,16 @@ mod test {
     #[rstest]
     fn church_numerals(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let zero = rt.lambda(|_f, rt| rt.lambda(|x, _rt| x));
+        let zero = rt.lambda([], |[], _f, rt| rt.lambda([], |[], x, _rt| x));
 
-        let succ = rt.lambda(|n, rt| {
-            rt.lambda(move |f, rt| {
-                let n = n.clone();
-                rt.lambda(move |x, rt| {
-                    let n = n.clone();
-                    let f = f.clone();
-                    rt.ap(f.clone(), rt.ap(rt.ap(n, f), x))
-                })
+        let succ = rt.lambda([], |[], n, rt| {
+            rt.lambda([n], |[n], f, rt| {
+                rt.lambda([n, f], |[n, f], x, rt| rt.ap(f, rt.ap(rt.ap(n, f), x)))
             })
         });
 
         // Convert church numeral to i32: apply n to inc and 0
-        let inc = rt.lambda(|x, rt| rt.i32(rt.get_i32(x) + 1));
+        let inc = rt.lambda([], |[], x, rt| rt.i32(rt.get_i32(x) + 1));
         let to_int =
             |n: &HeapPtr| -> i32 { rt.get_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0))) };
 
@@ -341,15 +353,12 @@ mod test {
     #[rstest]
     fn ski_combinators(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let i_comb = rt.lambda(|x, _rt| x);
-        let k_comb = rt.lambda(|x, rt| rt.lambda(move |_y, _rt| x.clone()));
-        let s_comb = rt.lambda(|x, rt| {
-            rt.lambda(move |y, rt| {
-                let x = x.clone();
-                rt.lambda(move |z, rt| {
-                    let x = x.clone();
-                    let y = y.clone();
-                    let xz = rt.ap(x, z.clone());
+        let i_comb = rt.lambda([], |[], x, _rt| x);
+        let k_comb = rt.lambda([], |[], x, rt| rt.lambda([x], |[x], _y, _rt| x));
+        let s_comb = rt.lambda([], |[], x, rt| {
+            rt.lambda([x], |[x], y, rt| {
+                rt.lambda([x, y], |[x, y], z, rt| {
+                    let xz = rt.ap(x, z);
                     let yz = rt.ap(y, z);
                     rt.ap(xz, yz)
                 })
@@ -371,20 +380,19 @@ mod test {
     }
 
     // -------------------------------------------------------------------------
-    // Deep currying is awkward in Rust due to manual cloning.
-    // f = \a.\b.\c. a
+    // Deep currying: f = \a.\b.\c. a
+    // With explicit env, no more awkward cloning!
     // -------------------------------------------------------------------------
     #[rstest]
-    fn deep_currying_is_awkward(
-        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
-    ) {
+    fn deep_currying(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let _f = rt.lambda(move |a, rt| {
-            rt.lambda(move |_b, rt| {
-                let a = a.clone();
-                rt.lambda(move |_c, _rt| a.clone())
-            })
+        let f = rt.lambda([], |[], a, rt| {
+            rt.lambda([a], |[a], _b, rt| rt.lambda([a], |[a], _c, _rt| a))
         });
+        assert_eq!(
+            rt.get_i32(rt.ap(rt.ap(rt.ap(f, rt.i32(1)), rt.i32(2)), rt.i32(3))),
+            1
+        );
     }
 }
 

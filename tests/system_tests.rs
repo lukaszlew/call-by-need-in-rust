@@ -16,7 +16,7 @@ fn identity_preserves_sharing(
 ) {
     let rt = Runtime::new(mode);
     let arg = rt.i32(42);
-    let result = rt.ap(rt.lambda(|x, _rt| x), arg);
+    let result = rt.ap(rt.lambda([], |[], x, _rt| x), arg);
     let _ = rt.get_i32(result); // force
     assert_eq!(rt.get_i32(arg), 42);
 }
@@ -54,13 +54,13 @@ fn nested_thunks(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: For
     let inner_count = Rc::new(Cell::new(0));
 
     let ic = inner_count.clone();
-    let inner_fn = rt.lambda(move |x, rt| {
+    let inner_fn = rt.lambda([], move |[], x, rt| {
         ic.set(ic.get() + 1);
         rt.i32(rt.get_i32(x) * 2)
     });
 
     let oc = outer_count.clone();
-    let outer_fn = rt.lambda(move |x, rt| {
+    let outer_fn = rt.lambda([inner_fn], move |[inner_fn], x, rt| {
         oc.set(oc.get() + 1);
         rt.ap(inner_fn, x)
     });
@@ -88,9 +88,9 @@ fn partial_application_sharing(
 
     // add = \x.\y. x + y (but tracks when outer lambda is called)
     let cc = c.clone();
-    let counted_add = rt.lambda(move |x, rt| {
+    let counted_add = rt.lambda([], move |[], x, rt| {
         cc.set(cc.get() + 1);
-        rt.lambda(move |y, rt| rt.i32(rt.get_i32(x) + rt.get_i32(y)))
+        rt.lambda([x], |[x], y, rt| rt.i32(rt.get_i32(x) + rt.get_i32(y)))
     });
 
     // add5 = add 5 (partial application)
@@ -149,7 +149,7 @@ fn force_is_idempotent(#[values(ForceMode::Recursive, ForceMode::Iterative)] mod
     assert_eq!(rt.get_i32(val), 42);
     assert_eq!(rt.get_i32(val), 42);
 
-    let thunk = rt.ap(rt.lambda(|x, _rt| x), rt.i32(99));
+    let thunk = rt.ap(rt.lambda([], |[], x, _rt| x), rt.i32(99));
     assert_eq!(rt.get_i32(thunk), 99);
     assert_eq!(rt.get_i32(thunk), 99);
     assert_eq!(rt.get_i32(thunk), 99);
@@ -167,8 +167,9 @@ fn closure_captures_multiple(
     let c_thunk = rt.ap(counted_const(&rt, 30), rt.i32(0));
 
     // Closure that captures a, b, c
-    let sum_abc =
-        rt.lambda(move |_, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b) + rt.get_i32(c_thunk)));
+    let sum_abc = rt.lambda([a, b, c_thunk], |[a, b, c], _, rt| {
+        rt.i32(rt.get_i32(a) + rt.get_i32(b) + rt.get_i32(c))
+    });
 
     let result = rt.ap(sum_abc, rt.i32(0));
 
