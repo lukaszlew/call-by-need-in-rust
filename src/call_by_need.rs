@@ -66,28 +66,19 @@ impl Runtime {
         self.counter.get()
     }
 
-    fn get_obj(&self, ptr: HeapPtr) -> HeapObj {
-        self.objects.borrow()[ptr.0].clone()
-    }
-
-    fn set_obj(&self, ptr: HeapPtr, obj: HeapObj) {
-        self.objects.borrow_mut()[ptr.0] = obj;
-    }
-
     /// Force and extract i32.
     #[must_use]
     pub fn get_i32(&self, ptr: HeapPtr) -> i32 {
-        self.force(ptr);
-        match self.get_obj(ptr) {
+        match self.force(ptr) {
             HeapObj::Value(Value::I32(n)) => n,
             _ => panic!("expected i32"),
         }
     }
 
     /// Force and extract closure.
+    #[must_use]
     fn get_closure(&self, ptr: HeapPtr) -> Closure {
-        self.force(ptr);
-        match self.get_obj(ptr) {
+        match self.force(ptr) {
             HeapObj::Value(Value::Closure(c)) => c,
             _ => panic!("expected closure"),
         }
@@ -95,19 +86,19 @@ impl Runtime {
 
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
-    fn force(&self, ptr: HeapPtr) {
-        let (f, arg) = match self.get_obj(ptr) {
-            HeapObj::App(f, arg) => (f, arg),
-            HeapObj::Value(_) => return,
-        };
-
-        let closure = self.get_closure(f); // forces f
-
-        let result = closure(arg, self);
-        self.force(result);
-        // We clone the result HeapObj into ptr's slot. GHC uses indirection nodes instead
-        // to avoid cloning, but that adds complexity. With Rc closures, cloning is cheap.
-        self.set_obj(ptr, self.get_obj(result));
+    fn force(&self, ptr: HeapPtr) -> HeapObj {
+        let obj = self.objects.borrow()[ptr.0].clone();
+        match obj {
+            v @ HeapObj::Value(_) => v,
+            HeapObj::App(f, arg) => {
+                let closure = self.get_closure(f);
+                let result = self.force(closure(arg, self));
+                // We clone the result HeapObj into ptr's slot. GHC uses indirection nodes
+                // instead to avoid cloning, but that adds complexity. With Rc, cloning is cheap.
+                self.objects.borrow_mut()[ptr.0] = result.clone();
+                result
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -191,10 +182,7 @@ mod test {
     #[test]
     fn plus_primitive() {
         let rt = Runtime::new();
-        assert_eq!(
-            rt.get_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4))),
-            7
-        );
+        assert_eq!(rt.get_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4))), 7);
     }
 
     // -------------------------------------------------------------------------
@@ -207,14 +195,8 @@ mod test {
         let fst = rt.lambda(move |x, rt| rt.lambda(move |_y, _rt| x.clone()));
         let snd = rt.lambda(move |_x, rt| rt.lambda(move |y, _rt| y.clone()));
 
-        assert_eq!(
-            rt.get_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6))),
-            5
-        );
-        assert_eq!(
-            rt.get_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6))),
-            6
-        );
+        assert_eq!(rt.get_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6))), 5);
+        assert_eq!(rt.get_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6))), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -297,9 +279,8 @@ mod test {
 
         // Convert church numeral to i32: apply n to inc and 0
         let inc = rt.lambda(|x, rt| rt.i32(rt.get_i32(x) + 1));
-        let to_int = |n: &HeapPtr| -> i32 {
-            rt.get_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)))
-        };
+        let to_int =
+            |n: &HeapPtr| -> i32 { rt.get_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0))) };
 
         let one = rt.ap(succ.clone(), zero.clone());
         let two = rt.ap(succ.clone(), one.clone());
