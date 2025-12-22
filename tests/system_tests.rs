@@ -136,7 +136,7 @@ fn deep_sharing(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: Forc
 
     assert_eq!(rt.count(), 0);
     assert_eq!(rt.get_i32(result), 2 + 4 + 6); // 12
-    // inc called exactly 3 times (once for a, once for b, once for c)
+                                               // inc called exactly 3 times (once for a, once for b, once for c)
     assert_eq!(rt.count(), 3);
 }
 
@@ -167,9 +167,8 @@ fn closure_captures_multiple(
     let c_thunk = rt.ap(counted_const(&rt, 30), rt.i32(0));
 
     // Closure that captures a, b, c
-    let sum_abc = rt.lambda(move |_, rt| {
-        rt.i32(rt.get_i32(a) + rt.get_i32(b) + rt.get_i32(c_thunk))
-    });
+    let sum_abc =
+        rt.lambda(move |_, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b) + rt.get_i32(c_thunk)));
 
     let result = rt.ap(sum_abc, rt.i32(0));
 
