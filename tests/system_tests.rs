@@ -4,14 +4,16 @@
 mod common;
 
 use call_by_need_in_rust::{force_expect_i32, Runtime};
-use common::{add, counted_const, counted_inc, counter};
+use common::{add, counted_const, counted_inc};
+use std::cell::Cell;
+use std::rc::Rc;
 
 // Test that identity doesn't corrupt shared arguments.
 #[test]
 fn identity_preserves_sharing() {
     let rt = Runtime::new();
     let arg = rt.i32(42);
-    let result = rt.ap(rt.lambda(|x, _rt| x), arg.clone());
+    let result = rt.ap(rt.lambda(|x, _rt| x), arg);
     rt.force(result);
     assert_eq!(rt.get_i32(arg).unwrap(), 42);
 }
@@ -21,30 +23,32 @@ fn identity_preserves_sharing() {
 #[test]
 fn diamond_sharing() {
     let rt = Runtime::new();
-    let c = counter();
-    let inc = counted_inc(&rt, &c);
+    let inc = counted_inc(&rt);
 
     // base = inc 10 (shared)
-    let base = rt.ap(inc.clone(), rt.i32(10));
+    let base = rt.ap(inc, rt.i32(10));
     // left = inc base
-    let left = rt.ap(inc.clone(), base.clone());
+    let inc2 = counted_inc(&rt);
+    let left = rt.ap(inc2, base);
     // right = inc base
-    let right = rt.ap(inc, base);
+    let inc3 = counted_inc(&rt);
+    let right = rt.ap(inc3, base);
     // result = left + right = (base+1) + (base+1) = 11+1 + 11+1 = 24
     let result = rt.ap(rt.ap(add(&rt), left), right);
 
-    assert_eq!(c.get(), 0);
+    assert_eq!(rt.count(), 0);
     assert_eq!(force_expect_i32(result, &rt), 24);
     // inc called 3 times: once for base, once for left, once for right
-    assert_eq!(c.get(), 3);
+    assert_eq!(rt.count(), 3);
 }
 
 // Nested thunks: outer thunk contains inner thunk, both memoized correctly.
+// Uses separate counters to verify each function called exactly once.
 #[test]
 fn nested_thunks() {
     let rt = Runtime::new();
-    let outer_count = counter();
-    let inner_count = counter();
+    let outer_count = Rc::new(Cell::new(0));
+    let inner_count = Rc::new(Cell::new(0));
 
     let ic = inner_count.clone();
     let inner_fn = rt.lambda(move |x, rt| {
@@ -55,7 +59,7 @@ fn nested_thunks() {
     let oc = outer_count.clone();
     let outer_fn = rt.lambda(move |x, rt| {
         oc.set(oc.get() + 1);
-        rt.ap(inner_fn.clone(), x)
+        rt.ap(inner_fn, x)
     });
 
     let thunk = rt.ap(outer_fn, rt.i32(5));
@@ -71,17 +75,17 @@ fn nested_thunks() {
 }
 
 // Partial application creates shared closure.
+// Uses separate counter to track outer lambda only.
 #[test]
 fn partial_application_sharing() {
     let rt = Runtime::new();
-    let c = counter();
+    let c = Rc::new(Cell::new(0));
 
     // add = \x.\y. x + y (but tracks when outer lambda is called)
     let cc = c.clone();
     let counted_add = rt.lambda(move |x, rt| {
         cc.set(cc.get() + 1);
         rt.lambda(move |y, rt| {
-            let x = x.clone();
             rt.i32(force_expect_i32(x, rt) + force_expect_i32(y, rt))
         })
     });
@@ -90,7 +94,7 @@ fn partial_application_sharing() {
     let add5 = rt.ap(counted_add, rt.i32(5));
 
     // Use add5 twice
-    let r1 = rt.ap(add5.clone(), rt.i32(10));
+    let r1 = rt.ap(add5, rt.i32(10));
     let r2 = rt.ap(add5, rt.i32(20));
 
     assert_eq!(c.get(), 0);
@@ -106,26 +110,31 @@ fn partial_application_sharing() {
 #[test]
 fn deep_sharing() {
     let rt = Runtime::new();
-    let c = counter();
-    let inc = counted_inc(&rt, &c);
+    let inc = counted_inc(&rt);
+    let inc2 = counted_inc(&rt);
+    let inc3 = counted_inc(&rt);
 
     // Create a chain: a -> b -> c, all shared
-    let a = rt.ap(inc.clone(), rt.i32(0)); // 1
-    let b = rt.ap(inc.clone(), a.clone()); // 2
-    let c_thunk = rt.ap(inc, b.clone()); // 3
+    let a = rt.ap(inc, rt.i32(0)); // 1
+    let b = rt.ap(inc2, a); // 2
+    let c_thunk = rt.ap(inc3, b); // 3
 
     // (a + a) + (b + b) + (c + c)
     let add_fn = add(&rt);
-    let aa = rt.ap(rt.ap(add_fn.clone(), a.clone()), a);
-    let bb = rt.ap(rt.ap(add_fn.clone(), b.clone()), b);
-    let cc = rt.ap(rt.ap(add_fn.clone(), c_thunk.clone()), c_thunk);
-    let aabb = rt.ap(rt.ap(add_fn.clone(), aa), bb);
+    let aa = rt.ap(rt.ap(add_fn, a), a);
+    let add_fn = add(&rt);
+    let bb = rt.ap(rt.ap(add_fn, b), b);
+    let add_fn = add(&rt);
+    let cc = rt.ap(rt.ap(add_fn, c_thunk), c_thunk);
+    let add_fn = add(&rt);
+    let aabb = rt.ap(rt.ap(add_fn, aa), bb);
+    let add_fn = add(&rt);
     let result = rt.ap(rt.ap(add_fn, aabb), cc);
 
-    assert_eq!(c.get(), 0);
+    assert_eq!(rt.count(), 0);
     assert_eq!(force_expect_i32(result, &rt), 2 + 4 + 6); // 12
     // inc called exactly 3 times (once for a, once for b, once for c)
-    assert_eq!(c.get(), 3);
+    assert_eq!(rt.count(), 3);
 }
 
 // Verify that forcing a value multiple times is idempotent.
@@ -149,27 +158,23 @@ fn force_is_idempotent() {
 #[test]
 fn closure_captures_multiple() {
     let rt = Runtime::new();
-    let c = counter();
 
-    let a = rt.ap(counted_const(&rt, &c, 10), rt.i32(0));
-    let b = rt.ap(counted_const(&rt, &c, 20), rt.i32(0));
-    let c_thunk = rt.ap(counted_const(&rt, &c, 30), rt.i32(0));
+    let a = rt.ap(counted_const(&rt, 10), rt.i32(0));
+    let b = rt.ap(counted_const(&rt, 20), rt.i32(0));
+    let c_thunk = rt.ap(counted_const(&rt, 30), rt.i32(0));
 
     // Closure that captures a, b, c
     let sum_abc = rt.lambda(move |_, rt| {
-        let a = a.clone();
-        let b = b.clone();
-        let c_thunk = c_thunk.clone();
         rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt) + force_expect_i32(c_thunk, rt))
     });
 
     let result = rt.ap(sum_abc, rt.i32(0));
 
-    assert_eq!(c.get(), 0);
+    assert_eq!(rt.count(), 0);
     assert_eq!(force_expect_i32(result, &rt), 60);
-    assert_eq!(c.get(), 3);
+    assert_eq!(rt.count(), 3);
 
     // Force again - should not re-evaluate
     assert_eq!(force_expect_i32(result, &rt), 60);
-    assert_eq!(c.get(), 3);
+    assert_eq!(rt.count(), 3);
 }

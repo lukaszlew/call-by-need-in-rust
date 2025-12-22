@@ -1,8 +1,7 @@
 // Reference counting is our GC replacement.
 use std::rc::Rc;
 
-// We use RefCell to mutate heap objects in-place when forcing lambda evaluation.
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 // Value enum makes it easier to add more types to the calculus.
 // Right now we have just Closures and i32.
@@ -44,12 +43,27 @@ type Closure = Rc<dyn Fn(HeapPtr, &Runtime) -> HeapPtr>;
 /// Runtime for the lambda calculus with explicit heap.
 pub struct Runtime {
     objects: RefCell<Vec<HeapObj>>,
+    /// Debug counter for tracking function calls in tests.
+    counter: Cell<i32>,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new() -> Self {
-        Runtime { objects: RefCell::new(Vec::new()) }
+        Runtime {
+            objects: RefCell::new(Vec::new()),
+            counter: Cell::new(0),
+        }
+    }
+
+    /// Increment the debug counter (for testing).
+    pub fn tick(&self) {
+        self.counter.set(self.counter.get() + 1);
+    }
+
+    /// Get the debug counter value (for testing).
+    pub fn count(&self) -> i32 {
+        self.counter.get()
     }
 
     fn get(&self, ptr: HeapPtr) -> HeapObj {
@@ -148,30 +162,19 @@ pub fn force_expect_i32(ptr: HeapPtr, rt: &Runtime) -> i32 {
 #[cfg(test)]
 mod test {
     use crate::{force_expect_i32, HeapPtr, Runtime};
-    use std::cell::Cell;
-    use std::rc::Rc;
 
-    /// Shared counter for tracking function calls in tests.
-    type Counter = Rc<Cell<i32>>;
-
-    fn counter() -> Counter {
-        Rc::new(Cell::new(0))
-    }
-
-    /// Create an increment function that counts how many times it's called.
-    fn counted_inc(rt: &Runtime, c: &Counter) -> HeapPtr {
-        let c = c.clone();
+    /// Create an increment function that ticks the counter when called.
+    fn counted_inc(rt: &Runtime) -> HeapPtr {
         rt.lambda(move |x, rt| {
-            c.set(c.get() + 1);
+            rt.tick();
             rt.i32(force_expect_i32(x, rt) + 1)
         })
     }
 
-    /// Create a thunk that returns `val` and increments counter when forced.
-    fn counted_const(rt: &Runtime, c: &Counter, val: i32) -> HeapPtr {
-        let c = c.clone();
+    /// Create a thunk that returns `val` and ticks the counter when forced.
+    fn counted_const(rt: &Runtime, val: i32) -> HeapPtr {
         rt.lambda(move |_, rt| {
-            c.set(c.get() + 1);
+            rt.tick();
             rt.i32(val)
         })
     }
@@ -220,8 +223,7 @@ mod test {
     #[test]
     fn unused_argument_not_evaluated() {
         let rt = Runtime::new();
-        let c = counter();
-        let expensive = counted_const(&rt, &c, 999);
+        let expensive = counted_const(&rt, 999);
 
         // const = \x.\y. x (ignores second argument)
         let const_fn = rt.lambda(|x, rt| {
@@ -232,7 +234,7 @@ mod test {
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
 
         assert_eq!(force_expect_i32(result, &rt), 42);
-        assert_eq!(c.get(), 0); // expensive was never called!
+        assert_eq!(rt.count(), 0); // expensive was never called!
     }
 
     // -------------------------------------------------------------------------
@@ -242,20 +244,19 @@ mod test {
     #[test]
     fn verify_call_by_need() {
         let rt = Runtime::new();
-        let c = counter();
-        let inc = counted_inc(&rt, &c);
+        let inc = counted_inc(&rt);
 
         // inc_twice = \n. inc (inc n)
         let inc_twice = rt.lambda(move |n, rt| {
-            rt.ap(inc.clone(), rt.ap(inc.clone(), n))
+            rt.ap(inc, rt.ap(inc, n))
         });
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
-        assert_eq!(c.get(), 0);
+        assert_eq!(rt.count(), 0);
         assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
-        assert_eq!(c.get(), 2);
+        assert_eq!(rt.count(), 2);
         assert_eq!(force_expect_i32(hopefully_12, &rt), 12);
-        assert_eq!(c.get(), 2); // Still 2! Memoization works.
+        assert_eq!(rt.count(), 2); // Still 2! Memoization works.
     }
 
     // -------------------------------------------------------------------------
@@ -265,16 +266,15 @@ mod test {
     #[test]
     fn shared_thunk_evaluated_once() {
         let rt = Runtime::new();
-        let c = counter();
-        let expensive = counted_const(&rt, &c, 1);
+        let expensive = counted_const(&rt, 1);
         let thunk = rt.ap(expensive, rt.i32(0));
 
         // Use thunk twice: add thunk thunk
-        let result = rt.ap(rt.ap(rt.plus(), thunk.clone()), thunk);
+        let result = rt.ap(rt.ap(rt.plus(), thunk), thunk);
 
-        assert_eq!(c.get(), 0);
+        assert_eq!(rt.count(), 0);
         assert_eq!(force_expect_i32(result, &rt), 2);
-        assert_eq!(c.get(), 1); // Called once, not twice!
+        assert_eq!(rt.count(), 1); // Called once, not twice!
     }
 
     // -------------------------------------------------------------------------
