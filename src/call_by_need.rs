@@ -137,9 +137,7 @@ impl Runtime {
     #[must_use]
     pub fn plus(&self) -> HeapPtr {
         self.lambda(|a, rt| {
-            rt.lambda(move |b, rt| {
-                rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt))
-            })
+            rt.lambda(move |b, rt| rt.i32(force_expect_i32(a, rt) + force_expect_i32(b, rt)))
         })
     }
 }
@@ -196,7 +194,10 @@ mod test {
     #[test]
     fn plus_primitive() {
         let rt = Runtime::new();
-        assert_eq!(force_expect_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt), 7);
+        assert_eq!(
+            force_expect_i32(rt.ap(rt.ap(rt.plus(), rt.i32(3)), rt.i32(4)), &rt),
+            7
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -206,15 +207,17 @@ mod test {
     #[test]
     fn fst_and_snd() {
         let rt = Runtime::new();
-        let fst = rt.lambda(move |x, rt| {
-            rt.lambda(move |_y, _rt| x.clone())
-        });
-        let snd = rt.lambda(move |_x, rt| {
-            rt.lambda(move |y, _rt| y.clone())
-        });
+        let fst = rt.lambda(move |x, rt| rt.lambda(move |_y, _rt| x.clone()));
+        let snd = rt.lambda(move |_x, rt| rt.lambda(move |y, _rt| y.clone()));
 
-        assert_eq!(force_expect_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt), 5);
-        assert_eq!(force_expect_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt), 6);
+        assert_eq!(
+            force_expect_i32(rt.ap(rt.ap(fst, rt.i32(5)), rt.i32(6)), &rt),
+            5
+        );
+        assert_eq!(
+            force_expect_i32(rt.ap(rt.ap(snd, rt.i32(5)), rt.i32(6)), &rt),
+            6
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -227,9 +230,7 @@ mod test {
         let expensive = counted_const(&rt, 999);
 
         // const = \x.\y. x (ignores second argument)
-        let const_fn = rt.lambda(|x, rt| {
-            rt.lambda(move |_y, _rt| x.clone())
-        });
+        let const_fn = rt.lambda(|x, rt| rt.lambda(move |_y, _rt| x.clone()));
 
         let unused_thunk = rt.ap(expensive, rt.i32(0));
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
@@ -248,9 +249,7 @@ mod test {
         let inc = counted_inc(&rt);
 
         // inc_twice = \n. inc (inc n)
-        let inc_twice = rt.lambda(move |n, rt| {
-            rt.ap(inc, rt.ap(inc, n))
-        });
+        let inc_twice = rt.lambda(move |n, rt| rt.ap(inc, rt.ap(inc, n)));
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
         assert_eq!(rt.count(), 0);
@@ -286,9 +285,7 @@ mod test {
     #[test]
     fn church_numerals() {
         let rt = Runtime::new();
-        let zero = rt.lambda(|_f, rt| {
-            rt.lambda(|x, _rt| x)
-        });
+        let zero = rt.lambda(|_f, rt| rt.lambda(|x, _rt| x));
 
         let succ = rt.lambda(|n, rt| {
             rt.lambda(move |f, rt| {
@@ -302,9 +299,7 @@ mod test {
         });
 
         // Convert church numeral to i32: apply n to inc and 0
-        let inc = rt.lambda(|x, rt| {
-            rt.i32(force_expect_i32(x, rt) + 1)
-        });
+        let inc = rt.lambda(|x, rt| rt.i32(force_expect_i32(x, rt) + 1));
         let to_int = |n: &HeapPtr| -> i32 {
             force_expect_i32(rt.ap(rt.ap(n.clone(), inc.clone()), rt.i32(0)), &rt)
         };
@@ -330,9 +325,7 @@ mod test {
     fn ski_combinators() {
         let rt = Runtime::new();
         let i_comb = rt.lambda(|x, _rt| x);
-        let k_comb = rt.lambda(|x, rt| {
-            rt.lambda(move |_y, _rt| x.clone())
-        });
+        let k_comb = rt.lambda(|x, rt| rt.lambda(move |_y, _rt| x.clone()));
         let s_comb = rt.lambda(|x, rt| {
             rt.lambda(move |y, rt| {
                 let x = x.clone();
@@ -350,7 +343,10 @@ mod test {
         assert_eq!(force_expect_i32(rt.ap(i_comb, rt.i32(5)), &rt), 5);
 
         // K 5 6 = 5
-        assert_eq!(force_expect_i32(rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt), 5);
+        assert_eq!(
+            force_expect_i32(rt.ap(rt.ap(k_comb.clone(), rt.i32(5)), rt.i32(6)), &rt),
+            5
+        );
 
         // S K K x = x (S K K is identity)
         let skk = rt.ap(rt.ap(s_comb, k_comb.clone()), k_comb);

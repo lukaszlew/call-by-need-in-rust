@@ -85,9 +85,7 @@ fn partial_application_sharing() {
     let cc = c.clone();
     let counted_add = rt.lambda(move |x, rt| {
         cc.set(cc.get() + 1);
-        rt.lambda(move |y, rt| {
-            rt.i32(force_expect_i32(x, rt) + force_expect_i32(y, rt))
-        })
+        rt.lambda(move |y, rt| rt.i32(force_expect_i32(x, rt) + force_expect_i32(y, rt)))
     });
 
     // add5 = add 5 (partial application)
@@ -133,7 +131,7 @@ fn deep_sharing() {
 
     assert_eq!(rt.count(), 0);
     assert_eq!(force_expect_i32(result, &rt), 2 + 4 + 6); // 12
-    // inc called exactly 3 times (once for a, once for b, once for c)
+                                                          // inc called exactly 3 times (once for a, once for b, once for c)
     assert_eq!(rt.count(), 3);
 }
 
