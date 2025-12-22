@@ -34,6 +34,14 @@ impl HeapObj {
 #[derive(Clone, Copy)]
 pub struct HeapPtr(usize);
 
+/// Which force implementation to use.
+#[derive(Clone, Copy, Default)]
+pub enum ForceMode {
+    Recursive,
+    #[default]
+    Iterative,
+}
+
 // Finally we learn that Closure is an ordinary Rust closure.
 // Unfortunately it does not have a static size, which depends on the number of captured variables (HeapPtrs).
 // We use Rc because closures need to be cloneable (for memoization when values are shared).
@@ -49,14 +57,22 @@ pub struct Runtime {
     objects: RefCell<Vec<HeapObj>>,
     /// Debug counter for tracking function calls in tests.
     counter: Cell<i32>,
+    /// Which force implementation to use.
+    mode: ForceMode,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_mode(ForceMode::default())
+    }
+
+    #[must_use]
+    pub fn with_mode(mode: ForceMode) -> Self {
         Runtime {
             objects: RefCell::new(Vec::new()),
             counter: Cell::new(0),
+            mode,
         }
     }
 
@@ -76,20 +92,57 @@ impl Runtime {
         self.force(ptr).unwrap_i32()
     }
 
+    fn force(&self, ptr: HeapPtr) -> HeapObj {
+        match self.mode {
+            ForceMode::Recursive => self.force_recursive(ptr),
+            ForceMode::Iterative => self.force_iter(ptr),
+        }
+    }
+
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
-    fn force(&self, ptr: HeapPtr) -> HeapObj {
+    // Recursive version - simple but can overflow stack on deep thunk chains.
+    fn force_recursive(&self, ptr: HeapPtr) -> HeapObj {
         let obj = self.objects.borrow()[ptr.0].clone();
         match obj {
             HeapObj::App(f, arg) => {
                 let closure = self.force(f).unwrap_closure();
                 let result = self.force(closure(arg, self));
-                // We clone the result HeapObj into ptr's slot. GHC uses indirection nodes
-                // instead to avoid cloning, but that adds complexity. With Rc, cloning is cheap.
                 self.objects.borrow_mut()[ptr.0] = result.clone();
                 result
             }
-            v => v, // already evaluated
+            v => v,
+        }
+    }
+
+    // Iterative version with explicit stack - handles arbitrary depth.
+    // This is closer to STG's eval/apply loop.
+    fn force_iter(&self, mut ptr: HeapPtr) -> HeapObj {
+        enum Frame {
+            Apply(HeapPtr),
+            Update(HeapPtr),
+        }
+        let mut stack: Vec<Frame> = vec![];
+
+        loop {
+            let obj = self.objects.borrow()[ptr.0].clone();
+            match obj {
+                HeapObj::App(f, arg) => {
+                    stack.push(Frame::Update(ptr));
+                    stack.push(Frame::Apply(arg));
+                    ptr = f;
+                }
+                value => match stack.pop() {
+                    None => return value,
+                    Some(Frame::Update(thunk)) => {
+                        self.objects.borrow_mut()[thunk.0] = value.clone();
+                        ptr = thunk;
+                    }
+                    Some(Frame::Apply(arg)) => {
+                        ptr = value.unwrap_closure()(arg, self);
+                    }
+                },
+            }
         }
     }
 
