@@ -66,11 +66,11 @@ impl Runtime {
         self.counter.get()
     }
 
-    fn get(&self, ptr: HeapPtr) -> HeapObj {
+    fn get_obj(&self, ptr: HeapPtr) -> HeapObj {
         self.objects.borrow()[ptr.0].clone()
     }
 
-    fn set(&self, ptr: HeapPtr, obj: HeapObj) {
+    fn set_obj(&self, ptr: HeapPtr, obj: HeapObj) {
         self.objects.borrow_mut()[ptr.0] = obj;
     }
 
@@ -78,8 +78,15 @@ impl Runtime {
     #[must_use]
     pub fn get_i32(&self, ptr: HeapPtr) -> Option<i32> {
         self.force(ptr);
-        match self.get(ptr) {
+        match self.get_obj(ptr) {
             HeapObj::Value(Value::I32(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn get_closure(&self, ptr: HeapPtr) -> Option<Closure> {
+        match self.get_obj(ptr) {
+            HeapObj::Value(Value::Closure(c)) => Some(c),
             _ => None,
         }
     }
@@ -87,21 +94,17 @@ impl Runtime {
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
     fn force(&self, ptr: HeapPtr) {
-        let (f, arg) = match self.get(ptr) {
+        let (f, arg) = match self.get_obj(ptr) {
             HeapObj::App(f, arg) => (f, arg),
             HeapObj::Value(_) => return,
         };
 
         self.force(f);
-
-        let closure = match self.get(f) {
-            HeapObj::Value(Value::Closure(c)) => c,
-            _ => panic!("expected closure"),
-        };
+        let closure = self.get_closure(f).expect("expected closure");
 
         let result = closure(arg, self);
         self.force(result);
-        self.set(ptr, self.get(result));
+        self.set_obj(ptr, self.get_obj(result));
     }
 
     // -------------------------------------------------------------------------
