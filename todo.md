@@ -18,7 +18,12 @@ What could we do next?
 
 - **Arity**: We treat all functions as taking 1 argument (curried). `plus 3 4` becomes `App(App(plus, 3), 4)` - two App nodes, two force cycles, one intermediate closure. STG tracks function arity. A 2-ary function applied to 2 args executes directly - no intermediate closure allocated. Under-saturated calls create PAP (partial application) objects.
 
-- **Stacks**: We use Rust's call stack for recursion in `force()`. STG uses explicit stacks: argument stack (pending args), return stack (continuations), update stack (thunks to memoize). Explicit stacks enable tail calls without stack growth.
+- **Stacks**: `force_iter` uses one stack with Apply/Update frames. STG has three:
+  - Argument stack: pending args. Our `Apply(HeapPtr)` is similar but one arg at a time.
+  - Update stack: thunks to memoize. Our `Update(HeapPtr)` is the same.
+  - Return stack: continuations after eval. We don't have this - the loop structure is our continuation.
+
+  STG's separation enables arity: function grabs N args at once. We always do one Apply per App.
 
 - **Memoization**: We clone the result HeapObj into the thunk's slot. STG writes an indirection pointer `Ind(result_ptr)` - no copying, just a pointer. GC later "shorts out" indirection chains. We clone because it's simple and cheap with Rc (just refcount bump).
 
