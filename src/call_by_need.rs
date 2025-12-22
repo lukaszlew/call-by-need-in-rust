@@ -1,7 +1,5 @@
-// Reference counting is our GC replacement.
+use std::cell::RefCell;
 use std::rc::Rc;
-
-use std::cell::{Cell, RefCell};
 
 // HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
 // Evaluation transmutes App into I32 or Closure.
@@ -58,8 +56,6 @@ struct Closure {
 /// Runtime for the lambda calculus with explicit heap.
 pub struct Runtime {
     objects: RefCell<Vec<HeapObj>>,
-    /// Debug counter for tracking function calls in tests.
-    counter: Cell<i32>,
     /// Which force implementation to use.
     mode: ForceMode,
 }
@@ -69,25 +65,22 @@ impl Runtime {
     pub fn new(mode: ForceMode) -> Self {
         Runtime {
             objects: RefCell::new(Vec::new()),
-            counter: Cell::new(0),
             mode,
         }
-    }
-
-    /// Increment the debug counter (for testing).
-    pub fn tick(&self) {
-        self.counter.set(self.counter.get() + 1);
-    }
-
-    /// Get the debug counter value (for testing).
-    pub fn count(&self) -> i32 {
-        self.counter.get()
     }
 
     /// Force and extract i32.
     #[must_use]
     pub fn get_i32(&self, ptr: HeapPtr) -> i32 {
         self.force(ptr).unwrap_i32()
+    }
+
+    /// Mutate heap object to i32. Breaks referential transparency.
+    /// Panics if the existing value is not I32.
+    pub fn set_i32(&self, ptr: HeapPtr, val: i32) {
+        let mut objects = self.objects.borrow_mut();
+        assert!(matches!(objects[ptr.0], HeapObj::I32(_)));
+        objects[ptr.0] = HeapObj::I32(val);
     }
 
     fn force(&self, ptr: HeapPtr) -> HeapObj {
@@ -202,19 +195,20 @@ mod test {
     use crate::{ForceMode, HeapPtr, Runtime};
     use rstest::rstest;
 
-    /// Create an increment function that ticks the counter when called.
-    fn counted_inc(rt: &Runtime) -> HeapPtr {
-        rt.lambda([], move |[], x, rt| {
-            rt.tick();
+    /// Create an increment function that increments counter when called.
+    fn counted_inc(rt: &Runtime, counter: HeapPtr) -> HeapPtr {
+        rt.lambda([counter], |[counter], x, rt| {
+            rt.set_i32(counter, rt.get_i32(counter) + 1);
             rt.i32(rt.get_i32(x) + 1)
         })
     }
 
-    /// Create a thunk that returns `val` and ticks the counter when forced.
-    fn counted_const(rt: &Runtime, val: i32) -> HeapPtr {
-        rt.lambda([], move |[], _, rt| {
-            rt.tick();
-            rt.i32(val)
+    /// Create a thunk that returns `val` and increments counter when forced.
+    fn counted_const(rt: &Runtime, counter: HeapPtr, val: i32) -> HeapPtr {
+        let val_ptr = rt.i32(val);
+        rt.lambda([counter, val_ptr], |[counter, val_ptr], _, rt| {
+            rt.set_i32(counter, rt.get_i32(counter) + 1);
+            rt.i32(rt.get_i32(val_ptr))
         })
     }
 
@@ -260,7 +254,8 @@ mod test {
         #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
     ) {
         let rt = Runtime::new(mode);
-        let expensive = counted_const(&rt, 999);
+        let counter = rt.i32(0);
+        let expensive = counted_const(&rt, counter, 999);
 
         // const = \x.\y. x (ignores second argument)
         let const_fn = rt.lambda([], |[], x, rt| rt.lambda([x], |[x], _y, _rt| x));
@@ -269,7 +264,7 @@ mod test {
         let result = rt.ap(rt.ap(const_fn, rt.i32(42)), unused_thunk);
 
         assert_eq!(rt.get_i32(result), 42);
-        assert_eq!(rt.count(), 0); // expensive was never called!
+        assert_eq!(rt.get_i32(counter), 0); // expensive was never called!
     }
 
     // -------------------------------------------------------------------------
@@ -279,17 +274,18 @@ mod test {
     #[rstest]
     fn verify_call_by_need(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let inc = counted_inc(&rt);
+        let counter = rt.i32(0);
+        let inc = counted_inc(&rt, counter);
 
         // inc_twice = \n. inc (inc n)
         let inc_twice = rt.lambda([inc], |[inc], n, rt| rt.ap(inc, rt.ap(inc, n)));
         let hopefully_12 = rt.ap(inc_twice, rt.i32(10));
 
-        assert_eq!(rt.count(), 0);
+        assert_eq!(rt.get_i32(counter), 0);
         assert_eq!(rt.get_i32(hopefully_12), 12);
-        assert_eq!(rt.count(), 2);
+        assert_eq!(rt.get_i32(counter), 2);
         assert_eq!(rt.get_i32(hopefully_12), 12);
-        assert_eq!(rt.count(), 2); // Still 2! Memoization works.
+        assert_eq!(rt.get_i32(counter), 2); // Still 2! Memoization works.
     }
 
     // -------------------------------------------------------------------------
@@ -301,15 +297,16 @@ mod test {
         #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
     ) {
         let rt = Runtime::new(mode);
-        let expensive = counted_const(&rt, 1);
+        let counter = rt.i32(0);
+        let expensive = counted_const(&rt, counter, 1);
         let thunk = rt.ap(expensive, rt.i32(0));
 
         // Use thunk twice: add thunk thunk
         let result = rt.ap(rt.ap(rt.plus(), thunk), thunk);
 
-        assert_eq!(rt.count(), 0);
+        assert_eq!(rt.get_i32(counter), 0);
         assert_eq!(rt.get_i32(result), 2);
-        assert_eq!(rt.count(), 1); // Called once, not twice!
+        assert_eq!(rt.get_i32(counter), 1); // Called once, not twice!
     }
 
     // -------------------------------------------------------------------------
