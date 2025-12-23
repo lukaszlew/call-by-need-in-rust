@@ -1,4 +1,6 @@
 What could we do next?
+- we need more tests before sharing and for that we need a parser and eq tester and perhaps readback
+- lam
 - force and get should be perhaps merged
 - syntax parsing.
 - black hole
