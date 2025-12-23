@@ -1,4 +1,54 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+
+// =============================================================================
+// FOAS: First-Order Abstract Syntax for explicit term representation
+// =============================================================================
+
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct Var(pub String);
+
+impl Var {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Var(name.into())
+    }
+}
+
+/// Term: explicit lambda calculus syntax (STG-style with explicit captures).
+#[derive(Clone, Debug)]
+pub enum Term {
+    Var(Var),
+    Lam {
+        captures: Vec<Var>,
+        param: Var,
+        body: Box<Term>,
+    },
+    App(Box<Term>, Box<Term>),
+    Int(i32),
+    Plus,
+}
+
+/// TermClosure: runtime representation of a FOAS lambda.
+/// Body remains as Term, run on application.
+///
+/// # Lexical Scoping
+/// Each closure captures its environment at creation time (the `env` field).
+/// When applied, we extend this captured env with the argument - we don't look up
+/// variables in the caller's environment. This is lexical (static) scoping.
+///
+/// # Why No Capture-Avoiding Substitution Needed
+/// We never substitute terms into terms. Instead:
+/// 1. When a lambda is instantiated, we capture current bindings into `env`
+/// 2. When applied, we extend `env` with param→arg and run the body
+/// 3. Variable lookup goes through `env`, not through textual substitution
+/// This environment-based approach sidesteps capture issues entirely.
+#[derive(Clone, Debug)]
+pub struct TermClosure {
+    pub param: Var,
+    pub body: Term,
+    pub env: HashMap<Var, HeapPtr>,
+}
 
 // HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
 // Evaluation transmutes App into I32 or Closure.
@@ -9,6 +59,7 @@ enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
     Closure(Closure),
+    TermClosure(TermClosure),
 }
 
 impl HeapObj {
@@ -18,17 +69,10 @@ impl HeapObj {
             _ => panic!("expected i32"),
         }
     }
-
-    fn unwrap_closure(self) -> Closure {
-        match self {
-            HeapObj::Closure(c) => c,
-            _ => panic!("expected closure"),
-        }
-    }
 }
 
 // HeapPtr is an index into Runtime's heap.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct HeapPtr(usize);
 
 /// Which force implementation to use.
@@ -89,6 +133,22 @@ impl Runtime {
         }
     }
 
+    /// Apply a closure (native or term-based) to an argument.
+    /// Signature mirrors Rust closures: (env, arg, rt) conceptually.
+    fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
+        match closure {
+            HeapObj::Closure(c) => (c.code)(c.env.as_ptr(), arg, self),
+            HeapObj::TermClosure(tc) => {
+                let mut env = tc.env;
+                let None = env.insert(tc.param.clone(), arg) else {
+                    panic!("param {:?} shadows capture", tc.param)
+                };
+                self.term(&env, &tc.body)
+            }
+            _ => panic!("expected closure"),
+        }
+    }
+
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
     // Recursive version - simple but can overflow stack on deep thunk chains.
@@ -96,8 +156,8 @@ impl Runtime {
         let obj = self.objects.borrow()[ptr.0].clone();
         match obj {
             HeapObj::App(f, arg) => {
-                let closure = self.force(f).unwrap_closure();
-                let result = self.force((closure.code)(closure.env.as_ptr(), arg, self));
+                let result_ptr = self.apply(self.force(f), arg);
+                let result = self.force(result_ptr);
                 self.objects.borrow_mut()[ptr.0] = result.clone();
                 result
             }
@@ -129,8 +189,7 @@ impl Runtime {
                         ptr = thunk;
                     }
                     Some(Frame::Apply(arg)) => {
-                        let closure = value.unwrap_closure();
-                        ptr = (closure.code)(closure.env.as_ptr(), arg, self);
+                        ptr = self.apply(value, arg);
                     }
                 },
             }
@@ -187,6 +246,42 @@ impl Runtime {
         self.lam([], |&[], a, rt| {
             rt.lam([a], |&[a], b, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b)))
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS: Term execution
+    // -------------------------------------------------------------------------
+
+    /// Allocate a Term with the given environment, producing a HeapPtr.
+    /// Signature: (env, term) mirrors Rust closure calls where env comes first.
+    #[must_use]
+    pub fn term(&self, env: &HashMap<Var, HeapPtr>, term: &Term) -> HeapPtr {
+        match term {
+            // Lexical scoping: look up in the provided env, not any "current" env.
+            Term::Var(v) => env[v],
+            Term::Int(n) => self.i32(*n),
+            Term::App(f, x) => {
+                let f_ptr = self.term(env, f);
+                let x_ptr = self.term(env, x);
+                self.app(f_ptr, x_ptr)
+            }
+            // Capture current bindings into closure's env - this is where
+            // lexical scoping happens. The closure remembers its definition site.
+            Term::Lam {
+                captures,
+                param,
+                body,
+            } => {
+                let closure_env: HashMap<Var, HeapPtr> =
+                    captures.iter().map(|v| (v.clone(), env[v])).collect();
+                self.alloc(HeapObj::TermClosure(TermClosure {
+                    param: param.clone(),
+                    body: (**body).clone(),
+                    env: closure_env,
+                }))
+            }
+            Term::Plus => self.plus(),
+        }
     }
 }
 
@@ -396,6 +491,223 @@ mod test {
             rt.get_i32(rt.app(rt.app(rt.app(f, rt.i32(1)), rt.i32(2)), rt.i32(3))),
             1
         );
+    }
+
+    // =========================================================================
+    // FOAS tests: Term-based explicit lambda calculus
+    // =========================================================================
+
+    use crate::{Term, Var};
+    use std::collections::HashMap;
+
+    // -------------------------------------------------------------------------
+    // Basic FOAS: (\x -> x) 5 = 5
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        let x = Var::new("x");
+        // \x. x
+        let id = Term::Lam {
+            captures: vec![],
+            param: x.clone(),
+            body: Box::new(Term::Var(x)),
+        };
+        // (\x. x) 5
+        let term = Term::App(Box::new(id), Box::new(Term::Int(5)));
+        let ptr = rt.term(&HashMap::new(), &term);
+        assert_eq!(rt.get_i32(ptr), 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS free variable: term with free var looked up in env
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_free_var(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        let x = Var::new("x");
+
+        // Term with free variable: just `x`
+        let term = Term::Var(x.clone());
+
+        // Provide binding in env
+        let env = HashMap::from([(x, rt.i32(42))]);
+
+        assert_eq!(rt.get_i32(rt.term(&env, &term)), 42);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS capture from env: \y. x captures x from outer env
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_capture_from_env(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        let x = Var::new("x");
+        let y = Var::new("y");
+
+        // \y. x (captures x from env, ignores param y)
+        let term = Term::Lam {
+            captures: vec![x.clone()],
+            param: y,
+            body: Box::new(Term::Var(x.clone())),
+        };
+
+        let env = HashMap::from([(x, rt.i32(100))]);
+
+        let closure = rt.term(&env, &term);
+        let result = rt.app(closure, rt.i32(999)); // arg ignored
+        assert_eq!(rt.get_i32(result), 100);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS plus: plus 3 4 = 7
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_plus(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // plus 3 4
+        let term = Term::App(
+            Box::new(Term::App(Box::new(Term::Plus), Box::new(Term::Int(3)))),
+            Box::new(Term::Int(4)),
+        );
+        let ptr = rt.term(&HashMap::new(), &term);
+        assert_eq!(rt.get_i32(ptr), 7);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS currying: fst 5 6 = 5, snd 5 6 = 6
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_fst_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+
+        // fst = \x.\y. x
+        let x = Var::new("x");
+        let y = Var::new("y");
+        let fst = Term::Lam {
+            captures: vec![],
+            param: x.clone(),
+            body: Box::new(Term::Lam {
+                captures: vec![x.clone()],
+                param: y.clone(),
+                body: Box::new(Term::Var(x.clone())),
+            }),
+        };
+
+        // snd = \x.\y. y
+        let x2 = Var::new("x");
+        let y2 = Var::new("y");
+        let snd = Term::Lam {
+            captures: vec![],
+            param: x2,
+            body: Box::new(Term::Lam {
+                captures: vec![],
+                param: y2.clone(),
+                body: Box::new(Term::Var(y2)),
+            }),
+        };
+
+        // fst 5 6 = 5
+        let fst_app = Term::App(
+            Box::new(Term::App(Box::new(fst), Box::new(Term::Int(5)))),
+            Box::new(Term::Int(6)),
+        );
+        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &fst_app)), 5);
+
+        // snd 5 6 = 6
+        let snd_app = Term::App(
+            Box::new(Term::App(Box::new(snd), Box::new(Term::Int(5)))),
+            Box::new(Term::Int(6)),
+        );
+        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &snd_app)), 6);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS laziness: const 42 (plus 1 2) doesn't evaluate plus
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_laziness(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+
+        // const = \x.\y. x
+        let x = Var::new("x");
+        let y = Var::new("y");
+        let const_fn = Term::Lam {
+            captures: vec![],
+            param: x.clone(),
+            body: Box::new(Term::Lam {
+                captures: vec![x.clone()],
+                param: y,
+                body: Box::new(Term::Var(x)),
+            }),
+        };
+
+        // const 42 (plus 1 2) - second arg never evaluated
+        let term = Term::App(
+            Box::new(Term::App(Box::new(const_fn), Box::new(Term::Int(42)))),
+            Box::new(Term::App(
+                Box::new(Term::App(Box::new(Term::Plus), Box::new(Term::Int(1)))),
+                Box::new(Term::Int(2)),
+            )),
+        );
+
+        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &term)), 42);
+    }
+
+    // -------------------------------------------------------------------------
+    // FOAS SKI: S K K x = x
+    // -------------------------------------------------------------------------
+    #[rstest]
+    fn foas_ski(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+
+        // K = \x.\y. x
+        let kx = Var::new("x");
+        let ky = Var::new("y");
+        let k = Term::Lam {
+            captures: vec![],
+            param: kx.clone(),
+            body: Box::new(Term::Lam {
+                captures: vec![kx.clone()],
+                param: ky,
+                body: Box::new(Term::Var(kx)),
+            }),
+        };
+
+        // S = \x.\y.\z. x z (y z)
+        let sx = Var::new("x");
+        let sy = Var::new("y");
+        let sz = Var::new("z");
+        let s = Term::Lam {
+            captures: vec![],
+            param: sx.clone(),
+            body: Box::new(Term::Lam {
+                captures: vec![sx.clone()],
+                param: sy.clone(),
+                body: Box::new(Term::Lam {
+                    captures: vec![sx.clone(), sy.clone()],
+                    param: sz.clone(),
+                    body: Box::new(Term::App(
+                        Box::new(Term::App(
+                            Box::new(Term::Var(sx)),
+                            Box::new(Term::Var(sz.clone())),
+                        )),
+                        Box::new(Term::App(Box::new(Term::Var(sy)), Box::new(Term::Var(sz)))),
+                    )),
+                }),
+            }),
+        };
+
+        // S K K 42 = 42
+        let skk_42 = Term::App(
+            Box::new(Term::App(
+                Box::new(Term::App(Box::new(s), Box::new(k.clone()))),
+                Box::new(k),
+            )),
+            Box::new(Term::Int(42)),
+        );
+
+        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &skk_42)), 42);
     }
 }
 

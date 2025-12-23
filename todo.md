@@ -1,5 +1,7 @@
 What could we do next?
 - force and get should be perhaps merged
+- syntax parsing.
+- black hole
 - Closure must be Rc<dyn Fn>, not Box. Box<dyn Fn> isn't Clone, but cloning is needed when
   memoizing shared values (e.g., identity returns its argument, which may be shared elsewhere).
 - How to change enum Value to union Value? Rc is in a way. ManualDrop?
