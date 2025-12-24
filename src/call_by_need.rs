@@ -1,3 +1,6 @@
+pub mod expr;
+pub mod expr_parser;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -540,7 +543,9 @@ mod test {
     // FOAS capture from env: \y. x captures x from outer env
     // -------------------------------------------------------------------------
     #[rstest]
-    fn foas_capture_from_env(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    fn foas_capture_from_env(
+        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+    ) {
         let rt = Runtime::new(mode);
         let x = Var::new("x");
         let y = Var::new("y");
