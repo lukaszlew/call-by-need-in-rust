@@ -4,36 +4,10 @@ pub mod expr_parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-// =============================================================================
-// FOAS: First-Order Abstract Syntax for explicit expr representation
-// =============================================================================
+pub use expr::{Expr, Var};
 
-#[derive(Clone, Hash, Eq, PartialEq, Debug)]
-pub struct Var(pub String);
-
-impl Var {
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Var(name.into())
-    }
-}
-
-/// Term: explicit lambda calculus syntax (STG-style with explicit captures).
-#[derive(Clone, Debug)]
-pub enum Expr {
-    Var(Var),
-    Lam {
-        captures: Vec<Var>,
-        param: Var,
-        body: Box<Expr>,
-    },
-    App(Box<Expr>, Box<Expr>),
-    Int(i32),
-    Plus,
-}
-
-/// TermClosure: runtime representation of a FOAS lambda.
-/// Body remains as Term, run on application.
+/// ExprClosure: runtime representation of a FOAS lambda.
+/// Body remains as Expr, evaluated on application.
 ///
 /// # Lexical Scoping
 /// Each closure captures its environment at creation time (the `env` field).
@@ -45,6 +19,7 @@ pub enum Expr {
 /// 1. When a lambda is instantiated, we capture current bindings into `env`
 /// 2. When applied, we extend `env` with param→arg and run the body
 /// 3. Variable lookup goes through `env`, not through textual substitution
+///
 /// This environment-based approach sidesteps capture issues entirely.
 #[derive(Clone, Debug)]
 pub struct ExprClosure {
@@ -172,28 +147,26 @@ impl Runtime {
     // This is closer to STG's eval/apply loop.
     fn force_iter(&self, mut ptr: HeapPtr) -> HeapObj {
         enum Frame {
-            Apply(HeapPtr),
-            Update(HeapPtr),
+            ApplyArg(HeapPtr),
+            UpdateThunk(HeapPtr),
         }
         let mut stack: Vec<Frame> = vec![];
 
         loop {
             let obj = self.objects.borrow()[ptr.0].clone();
-            match obj {
+            ptr = match obj {
                 HeapObj::App(f, arg) => {
-                    stack.push(Frame::Update(ptr));
-                    stack.push(Frame::Apply(arg));
-                    ptr = f;
+                    stack.push(Frame::UpdateThunk(ptr));
+                    stack.push(Frame::ApplyArg(arg));
+                    f
                 }
                 value => match stack.pop() {
                     None => return value,
-                    Some(Frame::Update(thunk)) => {
+                    Some(Frame::UpdateThunk(thunk)) => {
                         self.objects.borrow_mut()[thunk.0] = value.clone();
-                        ptr = thunk;
+                        thunk
                     }
-                    Some(Frame::Apply(arg)) => {
-                        ptr = self.apply(value, arg);
-                    }
+                    Some(Frame::ApplyArg(arg)) => self.apply(value, arg),
                 },
             }
         }
