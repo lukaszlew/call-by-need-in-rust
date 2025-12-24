@@ -33,11 +33,17 @@ pub struct ExprClosure {
 //
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
-enum HeapObj {
+pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
     Closure(Closure),
     ExprClosure(ExprClosure),
+    /// Neutral term: free variable applied to a spine of arguments.
+    /// `Neutral { head: n, spine: [a, b] }` represents `xn a b`
+    Neutral {
+        head: usize,
+        spine: Vec<HeapPtr>,
+    },
 }
 
 impl HeapObj {
@@ -65,7 +71,7 @@ pub enum ForceMode {
 // - env: captured HeapPtrs, explicit instead of relying on Rust's move captures
 // - code: plain fn pointer, no dynamic dispatch
 #[derive(Clone)]
-struct Closure {
+pub struct Closure {
     env: Vec<HeapPtr>,
     code: fn(*const HeapPtr, HeapPtr, &Runtime) -> HeapPtr,
 }
@@ -111,8 +117,7 @@ impl Runtime {
         }
     }
 
-    /// Apply a closure (native or expr-based) to an argument.
-    /// Signature mirrors Rust closures: (env, arg, rt) conceptually.
+    /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
             HeapObj::Closure(c) => (c.code)(c.env.as_ptr(), arg, self),
@@ -122,6 +127,10 @@ impl Runtime {
                     panic!("param {:?} shadows capture", tc.param)
                 };
                 self.expr(&env, &tc.body)
+            }
+            HeapObj::Neutral { head, mut spine } => {
+                spine.push(arg);
+                self.alloc(HeapObj::Neutral { head, spine })
             }
             _ => panic!("expected closure"),
         }
@@ -269,6 +278,46 @@ impl Runtime {
     #[must_use]
     pub fn run(&self, src: &str) -> HeapPtr {
         self.expr(&HashMap::new(), &expr_parser::parse(src))
+    }
+
+    // -------------------------------------------------------------------------
+    // Normalization by Evaluation (NbE)
+    // -------------------------------------------------------------------------
+
+    /// Convert a runtime value to its β-normal form as an Expr.
+    /// `depth` is the current de Bruijn level for fresh variables.
+    #[must_use]
+    pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
+        let obj = self.force(ptr);
+        match obj {
+            HeapObj::Closure(_) | HeapObj::ExprClosure(_) => {
+                let var = self.alloc(HeapObj::Neutral {
+                    head: depth,
+                    spine: vec![],
+                });
+                let body = self.apply(obj, var);
+                Expr::Lam {
+                    captures: vec![],
+                    param: Var::new(format!("x{depth}")),
+                    body: Box::new(self.readback(body, depth + 1)),
+                }
+            }
+            HeapObj::Neutral { head, spine } => {
+                let mut expr = Expr::Var(Var::new(format!("x{head}")));
+                for arg in spine {
+                    expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
+                }
+                expr
+            }
+            HeapObj::I32(n) => Expr::Int(n),
+            HeapObj::App(_, _) => panic!("unevaluated App in readback"),
+        }
+    }
+
+    /// Parse, evaluate, and normalize an expression to β-normal form.
+    #[must_use]
+    pub fn normalize(&self, src: &str) -> Expr {
+        self.readback(self.run(src), 0)
     }
 }
 
@@ -538,5 +587,281 @@ mod test {
         let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
         let k = r"\[] x. \[x] y. x";
         assert_eq!(rt.get_i32(rt.run(&format!("({s}) ({k}) ({k}) 42"))), 42);
+    }
+
+    // =========================================================================
+    // NbE tests: normalization by evaluation
+    // =========================================================================
+
+    #[rstest]
+    fn nbe_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // Different variable names, same identity function
+        assert_eq!(rt.normalize(r"\[] x. x"), rt.normalize(r"\[] y. y"));
+    }
+
+    #[rstest]
+    fn nbe_int(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        assert_eq!(rt.normalize("42"), crate::Expr::Int(42));
+    }
+
+    #[rstest]
+    fn nbe_plus(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        assert_eq!(rt.normalize("+ 1 2"), crate::Expr::Int(3));
+    }
+
+    #[rstest]
+    fn nbe_church_2(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // Church 2 applied to (+1) and 0 gives 2
+        let church_2 = r"\[] f. \[f] x. f (f x)";
+        assert_eq!(
+            rt.normalize(&format!("({church_2}) (+ 1) 0")),
+            crate::Expr::Int(2)
+        );
+    }
+
+    #[rstest]
+    fn nbe_skk_is_i(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // S K K = I (both normalize to \x. x)
+        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
+        let k = r"\[] x. \[x] y. x";
+        let i = r"\[] x. x";
+        assert_eq!(rt.normalize(&format!("({s}) ({k}) ({k})")), rt.normalize(i));
+    }
+
+    #[rstest]
+    fn nbe_stuck_app(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // \f. f (\x. x) normalizes to \x0. x0 (\x1. x1)
+        let result = rt.normalize(r"\[] f. f (\[] x. x)");
+        let expected = crate::Expr::Lam {
+            captures: vec![],
+            param: Var::new("x0"),
+            body: Box::new(crate::Expr::App(
+                Box::new(crate::Expr::Var(Var::new("x0"))),
+                Box::new(crate::Expr::Lam {
+                    captures: vec![],
+                    param: Var::new("x1"),
+                    body: Box::new(crate::Expr::Var(Var::new("x1"))),
+                }),
+            )),
+        };
+        assert_eq!(result, expected);
+    }
+
+    // Church numeral definitions for tests
+    const ZERO: &str = r"\[] f. \[] x. x";
+    const SUCC: &str = r"\[] n. \[n] f. \[n, f] x. f (n f x)";
+    const PLUS: &str = r"\[] m. \[m] n. \[m, n] f. \[m, n, f] x. m f (n f x)";
+    const MULT: &str = r"\[] m. \[m] n. \[m, n] f. m (n f)";
+    const TRUE: &str = r"\[] x. \[x] y. x";
+    const FALSE: &str = r"\[] x. \[] y. y";
+
+    fn church(n: usize) -> String {
+        let mut s = ZERO.to_string();
+        for _ in 0..n {
+            s = format!("({SUCC}) ({s})");
+        }
+        s
+    }
+
+    #[rstest]
+    fn nbe_church_add(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // 2 + 3 = 5
+        let two = church(2);
+        let three = church(3);
+        let five = church(5);
+        assert_eq!(
+            rt.normalize(&format!("({PLUS}) ({two}) ({three})")),
+            rt.normalize(&five)
+        );
+    }
+
+    #[rstest]
+    fn nbe_church_mult(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // 2 * 3 = 6
+        let two = church(2);
+        let three = church(3);
+        let six = church(6);
+        assert_eq!(
+            rt.normalize(&format!("({MULT}) ({two}) ({three})")),
+            rt.normalize(&six)
+        );
+    }
+
+    #[rstest]
+    fn nbe_compose(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // compose f g x = f (g x)
+        // compose id id = id
+        let compose = r"\[] f. \[f] g. \[f, g] x. f (g x)";
+        let id = r"\[] x. x";
+        assert_eq!(
+            rt.normalize(&format!("({compose}) ({id}) ({id})")),
+            rt.normalize(id)
+        );
+    }
+
+    #[rstest]
+    fn nbe_flip(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // flip f x y = f y x
+        // flip (flip f) = f
+        let flip = r"\[] f. \[f] x. \[f, x] y. f y x";
+        // flip (flip K) should equal K
+        let k = r"\[] x. \[x] y. x";
+        assert_eq!(
+            rt.normalize(&format!("({flip}) (({flip}) ({k}))")),
+            rt.normalize(k)
+        );
+    }
+
+    #[rstest]
+    fn nbe_church_booleans(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // not true = false, not false = true
+        let not = r"\[] b. \[b] x. \[b, x] y. b y x";
+        assert_eq!(
+            rt.normalize(&format!("({not}) ({TRUE})")),
+            rt.normalize(FALSE)
+        );
+        assert_eq!(
+            rt.normalize(&format!("({not}) ({FALSE})")),
+            rt.normalize(TRUE)
+        );
+    }
+
+    #[rstest]
+    fn nbe_and_or(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        let and = r"\[] a. \[a] b. a b a";
+        let or = r"\[] a. \[a] b. a a b";
+
+        // true && false = false
+        assert_eq!(
+            rt.normalize(&format!("({and}) ({TRUE}) ({FALSE})")),
+            rt.normalize(FALSE)
+        );
+        // true && true = true
+        assert_eq!(
+            rt.normalize(&format!("({and}) ({TRUE}) ({TRUE})")),
+            rt.normalize(TRUE)
+        );
+        // false || true = true
+        assert_eq!(
+            rt.normalize(&format!("({or}) ({FALSE}) ({TRUE})")),
+            rt.normalize(TRUE)
+        );
+        // false || false = false
+        assert_eq!(
+            rt.normalize(&format!("({or}) ({FALSE}) ({FALSE})")),
+            rt.normalize(FALSE)
+        );
+    }
+
+    #[rstest]
+    fn nbe_pair(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        let pair = r"\[] a. \[a] b. \[a, b] f. f a b";
+        let fst = r"\[] p. p (\[] a. \[a] b. a)";
+        let snd = r"\[] p. p (\[] a. \[] b. b)";
+        let id = r"\[] x. x";
+        let k = r"\[] x. \[x] y. x";
+
+        // fst (pair id k) = id
+        assert_eq!(
+            rt.normalize(&format!("({fst}) (({pair}) ({id}) ({k}))")),
+            rt.normalize(id)
+        );
+        // snd (pair id k) = k
+        assert_eq!(
+            rt.normalize(&format!("({snd}) (({pair}) ({id}) ({k}))")),
+            rt.normalize(k)
+        );
+    }
+
+    #[rstest]
+    fn nbe_y_fragment(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // Not full Y combinator (would diverge), but test its building blocks
+        // (\x. x x) applied to K gives K K which normalizes
+        let omega_half = r"\[] x. x x";
+        let k = r"\[] x. \[x] y. x";
+        // (\x. x x) K = K K = \y. K
+        assert_eq!(
+            rt.normalize(&format!("({omega_half}) ({k})")),
+            rt.normalize(&format!("({k}) ({k})"))
+        );
+    }
+
+    #[rstest]
+    fn nbe_s_combinator_partial(
+        #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+    ) {
+        let rt = Runtime::new(mode);
+        // S K = \y.\z. K z (y z) = \y.\z. z
+        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
+        let k = r"\[] x. \[x] y. x";
+        // S K anything = I
+        let i = r"\[] x. x";
+        assert_eq!(rt.normalize(&format!("({s}) ({k}) ({k})")), rt.normalize(i));
+        // Also S K S = I
+        assert_eq!(rt.normalize(&format!("({s}) ({k}) ({s})")), rt.normalize(i));
+    }
+
+    #[rstest]
+    fn nbe_b_combinator(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // B = S (K S) K (composition)
+        // B f g x = f (g x)
+        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
+        let k = r"\[] x. \[x] y. x";
+        let b_via_sk = format!("({s}) (({k}) ({s})) ({k})");
+        let b_direct = r"\[] f. \[f] g. \[f, g] x. f (g x)";
+        assert_eq!(rt.normalize(&b_via_sk), rt.normalize(b_direct));
+    }
+
+    #[rstest]
+    fn nbe_c_combinator(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // C = flip = \f.\x.\y. f y x
+        // C (C f) = f
+        let c = r"\[] f. \[f] x. \[f, x] y. f y x";
+        let f = r"\[] a. \[a] b. a"; // K
+        assert_eq!(
+            rt.normalize(&format!("({c}) (({c}) ({f}))")),
+            rt.normalize(f)
+        );
+    }
+
+    #[rstest]
+    fn nbe_church_exp(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // exp m n = n m (Church exponentiation)
+        // 2^3 = 8
+        let two = church(2);
+        let three = church(3);
+        let eight = church(8);
+        // exp = \m.\n. n m
+        assert_eq!(
+            rt.normalize(&format!("({three}) ({two})")),
+            rt.normalize(&eight)
+        );
+    }
+
+    #[rstest]
+    fn nbe_nested_stuck(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+        let rt = Runtime::new(mode);
+        // \f.\g. f (g f) (\x. g x)
+        // Tests deeply nested stuck applications
+        let expr1 = r"\[] f. \[f] g. f (g f) (\[g] x. g x)";
+        let expr2 = r"\[] a. \[a] b. a (b a) (\[b] y. b y)";
+        assert_eq!(rt.normalize(expr1), rt.normalize(expr2));
     }
 }
