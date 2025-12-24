@@ -38,9 +38,8 @@ pub enum HeapObj {
     I32(i32),
     RustClosure(RustClosure),
     ExprClosure(ExprClosure),
-    /// Neutral term: free variable applied to a spine of arguments.
-    /// `Neutral { head: n, spine: [a, b] }` represents `xn a b`
-    ReadbackClosure {
+    ReadbackFreeVar {
+        /// `{ head: n, spine: [a, b] }` represents `xn a b`
         head: usize,
         spine: Vec<HeapPtr>,
     },
@@ -128,9 +127,9 @@ impl Runtime {
                 };
                 self.expr(&env, &tc.body)
             }
-            HeapObj::ReadbackClosure { head, mut spine } => {
+            HeapObj::ReadbackFreeVar { head, mut spine } => {
                 spine.push(arg);
-                self.alloc(HeapObj::ReadbackClosure { head, spine })
+                self.alloc(HeapObj::ReadbackFreeVar { head, spine })
             }
             _ => panic!("expected closure"),
         }
@@ -291,7 +290,7 @@ impl Runtime {
         let obj = self.force(ptr);
         match obj {
             HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
-                let var = self.alloc(HeapObj::ReadbackClosure {
+                let var = self.alloc(HeapObj::ReadbackFreeVar {
                     head: depth,
                     spine: vec![],
                 });
@@ -302,7 +301,7 @@ impl Runtime {
                     body: Box::new(self.readback(body, depth + 1)),
                 }
             }
-            HeapObj::ReadbackClosure { head, spine } => {
+            HeapObj::ReadbackFreeVar { head, spine } => {
                 let mut expr = Expr::Var(Var::new(format!("x{head}")));
                 for arg in spine {
                     expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
