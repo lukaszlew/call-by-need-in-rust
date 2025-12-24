@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 // =============================================================================
-// FOAS: First-Order Abstract Syntax for explicit term representation
+// FOAS: First-Order Abstract Syntax for explicit expr representation
 // =============================================================================
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -20,14 +20,14 @@ impl Var {
 
 /// Term: explicit lambda calculus syntax (STG-style with explicit captures).
 #[derive(Clone, Debug)]
-pub enum Term {
+pub enum Expr {
     Var(Var),
     Lam {
         captures: Vec<Var>,
         param: Var,
-        body: Box<Term>,
+        body: Box<Expr>,
     },
-    App(Box<Term>, Box<Term>),
+    App(Box<Expr>, Box<Expr>),
     Int(i32),
     Plus,
 }
@@ -47,9 +47,9 @@ pub enum Term {
 /// 3. Variable lookup goes through `env`, not through textual substitution
 /// This environment-based approach sidesteps capture issues entirely.
 #[derive(Clone, Debug)]
-pub struct TermClosure {
+pub struct ExprClosure {
     pub param: Var,
-    pub body: Term,
+    pub body: Expr,
     pub env: HashMap<Var, HeapPtr>,
 }
 
@@ -62,7 +62,7 @@ enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
     Closure(Closure),
-    TermClosure(TermClosure),
+    ExprClosure(ExprClosure),
 }
 
 impl HeapObj {
@@ -136,17 +136,17 @@ impl Runtime {
         }
     }
 
-    /// Apply a closure (native or term-based) to an argument.
+    /// Apply a closure (native or expr-based) to an argument.
     /// Signature mirrors Rust closures: (env, arg, rt) conceptually.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
             HeapObj::Closure(c) => (c.code)(c.env.as_ptr(), arg, self),
-            HeapObj::TermClosure(tc) => {
+            HeapObj::ExprClosure(tc) => {
                 let mut env = tc.env;
                 let None = env.insert(tc.param.clone(), arg) else {
                     panic!("param {:?} shadows capture", tc.param)
                 };
-                self.term(&env, &tc.body)
+                self.expr(&env, &tc.body)
             }
             _ => panic!("expected closure"),
         }
@@ -256,34 +256,34 @@ impl Runtime {
     // -------------------------------------------------------------------------
 
     /// Allocate a Term with the given environment, producing a HeapPtr.
-    /// Signature: (env, term) mirrors Rust closure calls where env comes first.
+    /// Signature: (env, expr) mirrors Rust closure calls where env comes first.
     #[must_use]
-    pub fn term(&self, env: &HashMap<Var, HeapPtr>, term: &Term) -> HeapPtr {
-        match term {
+    pub fn expr(&self, env: &HashMap<Var, HeapPtr>, expr: &Expr) -> HeapPtr {
+        match expr {
             // Lexical scoping: look up in the provided env, not any "current" env.
-            Term::Var(v) => env[v],
-            Term::Int(n) => self.i32(*n),
-            Term::App(f, x) => {
-                let f_ptr = self.term(env, f);
-                let x_ptr = self.term(env, x);
+            Expr::Var(v) => env[v],
+            Expr::Int(n) => self.i32(*n),
+            Expr::App(f, x) => {
+                let f_ptr = self.expr(env, f);
+                let x_ptr = self.expr(env, x);
                 self.app(f_ptr, x_ptr)
             }
             // Capture current bindings into closure's env - this is where
             // lexical scoping happens. The closure remembers its definition site.
-            Term::Lam {
+            Expr::Lam {
                 captures,
                 param,
                 body,
             } => {
                 let closure_env: HashMap<Var, HeapPtr> =
                     captures.iter().map(|v| (v.clone(), env[v])).collect();
-                self.alloc(HeapObj::TermClosure(TermClosure {
+                self.alloc(HeapObj::ExprClosure(ExprClosure {
                     param: param.clone(),
                     body: (**body).clone(),
                     env: closure_env,
                 }))
             }
-            Term::Plus => self.plus(),
+            Expr::Plus => self.plus(),
         }
     }
 }
@@ -500,7 +500,7 @@ mod test {
     // FOAS tests: Term-based explicit lambda calculus
     // =========================================================================
 
-    use crate::{Term, Var};
+    use crate::{Expr, Var};
     use std::collections::HashMap;
 
     // -------------------------------------------------------------------------
@@ -511,19 +511,19 @@ mod test {
         let rt = Runtime::new(mode);
         let x = Var::new("x");
         // \x. x
-        let id = Term::Lam {
+        let id = Expr::Lam {
             captures: vec![],
             param: x.clone(),
-            body: Box::new(Term::Var(x)),
+            body: Box::new(Expr::Var(x)),
         };
         // (\x. x) 5
-        let term = Term::App(Box::new(id), Box::new(Term::Int(5)));
-        let ptr = rt.term(&HashMap::new(), &term);
+        let expr = Expr::App(Box::new(id), Box::new(Expr::Int(5)));
+        let ptr = rt.expr(&HashMap::new(), &expr);
         assert_eq!(rt.get_i32(ptr), 5);
     }
 
     // -------------------------------------------------------------------------
-    // FOAS free variable: term with free var looked up in env
+    // FOAS free variable: expr with free var looked up in env
     // -------------------------------------------------------------------------
     #[rstest]
     fn foas_free_var(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
@@ -531,12 +531,12 @@ mod test {
         let x = Var::new("x");
 
         // Term with free variable: just `x`
-        let term = Term::Var(x.clone());
+        let expr = Expr::Var(x.clone());
 
         // Provide binding in env
         let env = HashMap::from([(x, rt.i32(42))]);
 
-        assert_eq!(rt.get_i32(rt.term(&env, &term)), 42);
+        assert_eq!(rt.get_i32(rt.expr(&env, &expr)), 42);
     }
 
     // -------------------------------------------------------------------------
@@ -551,15 +551,15 @@ mod test {
         let y = Var::new("y");
 
         // \y. x (captures x from env, ignores param y)
-        let term = Term::Lam {
+        let expr = Expr::Lam {
             captures: vec![x.clone()],
             param: y,
-            body: Box::new(Term::Var(x.clone())),
+            body: Box::new(Expr::Var(x.clone())),
         };
 
         let env = HashMap::from([(x, rt.i32(100))]);
 
-        let closure = rt.term(&env, &term);
+        let closure = rt.expr(&env, &expr);
         let result = rt.app(closure, rt.i32(999)); // arg ignored
         assert_eq!(rt.get_i32(result), 100);
     }
@@ -571,11 +571,11 @@ mod test {
     fn foas_plus(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // plus 3 4
-        let term = Term::App(
-            Box::new(Term::App(Box::new(Term::Plus), Box::new(Term::Int(3)))),
-            Box::new(Term::Int(4)),
+        let expr = Expr::App(
+            Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(3)))),
+            Box::new(Expr::Int(4)),
         );
-        let ptr = rt.term(&HashMap::new(), &term);
+        let ptr = rt.expr(&HashMap::new(), &expr);
         assert_eq!(rt.get_i32(ptr), 7);
     }
 
@@ -589,42 +589,42 @@ mod test {
         // fst = \x.\y. x
         let x = Var::new("x");
         let y = Var::new("y");
-        let fst = Term::Lam {
+        let fst = Expr::Lam {
             captures: vec![],
             param: x.clone(),
-            body: Box::new(Term::Lam {
+            body: Box::new(Expr::Lam {
                 captures: vec![x.clone()],
                 param: y.clone(),
-                body: Box::new(Term::Var(x.clone())),
+                body: Box::new(Expr::Var(x.clone())),
             }),
         };
 
         // snd = \x.\y. y
         let x2 = Var::new("x");
         let y2 = Var::new("y");
-        let snd = Term::Lam {
+        let snd = Expr::Lam {
             captures: vec![],
             param: x2,
-            body: Box::new(Term::Lam {
+            body: Box::new(Expr::Lam {
                 captures: vec![],
                 param: y2.clone(),
-                body: Box::new(Term::Var(y2)),
+                body: Box::new(Expr::Var(y2)),
             }),
         };
 
         // fst 5 6 = 5
-        let fst_app = Term::App(
-            Box::new(Term::App(Box::new(fst), Box::new(Term::Int(5)))),
-            Box::new(Term::Int(6)),
+        let fst_app = Expr::App(
+            Box::new(Expr::App(Box::new(fst), Box::new(Expr::Int(5)))),
+            Box::new(Expr::Int(6)),
         );
-        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &fst_app)), 5);
+        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &fst_app)), 5);
 
         // snd 5 6 = 6
-        let snd_app = Term::App(
-            Box::new(Term::App(Box::new(snd), Box::new(Term::Int(5)))),
-            Box::new(Term::Int(6)),
+        let snd_app = Expr::App(
+            Box::new(Expr::App(Box::new(snd), Box::new(Expr::Int(5)))),
+            Box::new(Expr::Int(6)),
         );
-        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &snd_app)), 6);
+        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &snd_app)), 6);
     }
 
     // -------------------------------------------------------------------------
@@ -637,26 +637,26 @@ mod test {
         // const = \x.\y. x
         let x = Var::new("x");
         let y = Var::new("y");
-        let const_fn = Term::Lam {
+        let const_fn = Expr::Lam {
             captures: vec![],
             param: x.clone(),
-            body: Box::new(Term::Lam {
+            body: Box::new(Expr::Lam {
                 captures: vec![x.clone()],
                 param: y,
-                body: Box::new(Term::Var(x)),
+                body: Box::new(Expr::Var(x)),
             }),
         };
 
         // const 42 (plus 1 2) - second arg never evaluated
-        let term = Term::App(
-            Box::new(Term::App(Box::new(const_fn), Box::new(Term::Int(42)))),
-            Box::new(Term::App(
-                Box::new(Term::App(Box::new(Term::Plus), Box::new(Term::Int(1)))),
-                Box::new(Term::Int(2)),
+        let expr = Expr::App(
+            Box::new(Expr::App(Box::new(const_fn), Box::new(Expr::Int(42)))),
+            Box::new(Expr::App(
+                Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(1)))),
+                Box::new(Expr::Int(2)),
             )),
         );
 
-        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &term)), 42);
+        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &expr)), 42);
     }
 
     // -------------------------------------------------------------------------
@@ -669,13 +669,13 @@ mod test {
         // K = \x.\y. x
         let kx = Var::new("x");
         let ky = Var::new("y");
-        let k = Term::Lam {
+        let k = Expr::Lam {
             captures: vec![],
             param: kx.clone(),
-            body: Box::new(Term::Lam {
+            body: Box::new(Expr::Lam {
                 captures: vec![kx.clone()],
                 param: ky,
-                body: Box::new(Term::Var(kx)),
+                body: Box::new(Expr::Var(kx)),
             }),
         };
 
@@ -683,36 +683,36 @@ mod test {
         let sx = Var::new("x");
         let sy = Var::new("y");
         let sz = Var::new("z");
-        let s = Term::Lam {
+        let s = Expr::Lam {
             captures: vec![],
             param: sx.clone(),
-            body: Box::new(Term::Lam {
+            body: Box::new(Expr::Lam {
                 captures: vec![sx.clone()],
                 param: sy.clone(),
-                body: Box::new(Term::Lam {
+                body: Box::new(Expr::Lam {
                     captures: vec![sx.clone(), sy.clone()],
                     param: sz.clone(),
-                    body: Box::new(Term::App(
-                        Box::new(Term::App(
-                            Box::new(Term::Var(sx)),
-                            Box::new(Term::Var(sz.clone())),
+                    body: Box::new(Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(Expr::Var(sx)),
+                            Box::new(Expr::Var(sz.clone())),
                         )),
-                        Box::new(Term::App(Box::new(Term::Var(sy)), Box::new(Term::Var(sz)))),
+                        Box::new(Expr::App(Box::new(Expr::Var(sy)), Box::new(Expr::Var(sz)))),
                     )),
                 }),
             }),
         };
 
         // S K K 42 = 42
-        let skk_42 = Term::App(
-            Box::new(Term::App(
-                Box::new(Term::App(Box::new(s), Box::new(k.clone()))),
+        let skk_42 = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::App(Box::new(s), Box::new(k.clone()))),
                 Box::new(k),
             )),
-            Box::new(Term::Int(42)),
+            Box::new(Expr::Int(42)),
         );
 
-        assert_eq!(rt.get_i32(rt.term(&HashMap::new(), &skk_42)), 42);
+        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &skk_42)), 42);
     }
 }
 
