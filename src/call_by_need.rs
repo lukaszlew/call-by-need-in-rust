@@ -151,27 +151,27 @@ impl Runtime {
     // Iterative version with explicit stack - handles arbitrary depth.
     // This is closer to STG's eval/apply loop.
     fn force_iter(&self, mut ptr: HeapPtr) -> HeapObj {
-        enum Frame {
-            ApplyArg(HeapPtr),
+        enum UseValueTo {
+            ApplyAsArg(HeapPtr),
             UpdateThunk(HeapPtr),
         }
-        let mut stack: Vec<Frame> = vec![];
+        let mut stack: Vec<UseValueTo> = vec![];
 
         loop {
             let obj = self.objects.borrow()[ptr.0].clone();
-            ptr = match obj {
+            match obj {
                 HeapObj::App(f, arg) => {
-                    stack.push(Frame::UpdateThunk(ptr));
-                    stack.push(Frame::ApplyArg(arg));
-                    f
+                    stack.push(UseValueTo::UpdateThunk(ptr));
+                    stack.push(UseValueTo::ApplyAsArg(arg));
+                    ptr = f
                 }
                 value => match stack.pop() {
                     None => return value,
-                    Some(Frame::UpdateThunk(thunk)) => {
+                    Some(UseValueTo::UpdateThunk(thunk)) => {
                         self.update(thunk, value.clone());
-                        thunk
+                        ptr = thunk
                     }
-                    Some(Frame::ApplyArg(arg)) => self.apply(value, arg),
+                    Some(UseValueTo::ApplyAsArg(arg)) => ptr = self.apply(value, arg),
                 },
             }
         }
