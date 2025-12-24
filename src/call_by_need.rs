@@ -540,10 +540,3 @@ mod test {
         assert_eq!(rt.get_i32(rt.run(&format!("({s}) ({k}) ({k}) 42"))), 42);
     }
 }
-
-// So what did we learn?
-// - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
-// - The code of Rust lambdas that are passed to `lambda` are compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
-// - `lambda` allocates a closure, not a function on the heap, it is a struct containing HeapPtrs to all referenced variables.
-// - Closures use Rc<dyn Fn> to enable cloning for memoization of shared values.
-// - `ap` does not call a function but allocates unevaluated object on the heap.
