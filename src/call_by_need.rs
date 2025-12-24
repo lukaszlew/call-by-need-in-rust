@@ -127,6 +127,11 @@ impl Runtime {
         }
     }
 
+    /// Update a thunk with its evaluated result (memoization).
+    fn update(&self, thunk: HeapPtr, value: HeapObj) {
+        self.objects.borrow_mut()[thunk.0] = value;
+    }
+
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
     // Recursive version - simple but can overflow stack on deep thunk chains.
@@ -134,9 +139,9 @@ impl Runtime {
         let obj = self.objects.borrow()[ptr.0].clone();
         match obj {
             HeapObj::App(f, arg) => {
-                let result_ptr = self.apply(self.force(f), arg);
-                let result = self.force(result_ptr);
-                self.objects.borrow_mut()[ptr.0] = result.clone();
+                let result_ptr = self.apply(self.force_recursive(f), arg);
+                let result = self.force_recursive(result_ptr);
+                self.update(ptr, result.clone());
                 result
             }
             v => v,
@@ -163,7 +168,7 @@ impl Runtime {
                 value => match stack.pop() {
                     None => return value,
                     Some(Frame::UpdateThunk(thunk)) => {
-                        self.objects.borrow_mut()[thunk.0] = value.clone();
+                        self.update(thunk, value.clone());
                         thunk
                     }
                     Some(Frame::ApplyArg(arg)) => self.apply(value, arg),
