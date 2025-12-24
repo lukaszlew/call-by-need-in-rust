@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 
-use crate::expr::Expr;
+use crate::expr::{Expr, Var};
 
 pub fn parse(input: &str) -> Expr {
     parser().parse(input).expect("parse error")
@@ -14,9 +14,10 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
     recursive(|expr| {
         let ident = text::ident().padded();
 
-        let var = ident.map(Expr::Var);
+        let var = ident.map(|s| Expr::Var(Var::new(s)));
 
         let captures = ident
+            .map(Var::new)
             .separated_by(just(','))
             .allow_trailing()
             .delimited_by(just('['), just(']'))
@@ -24,7 +25,7 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         let lambda = just('\\')
             .ignore_then(captures)
-            .then(ident)
+            .then(ident.map(Var::new))
             .then_ignore(just('.'))
             .then(expr.clone())
             .map(|((caps, param), body)| Expr::Lam {
