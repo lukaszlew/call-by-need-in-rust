@@ -36,11 +36,11 @@ pub struct ExprClosure {
 pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
-    Closure(Closure),
+    RustClosure(RustClosure),
     ExprClosure(ExprClosure),
     /// Neutral term: free variable applied to a spine of arguments.
     /// `Neutral { head: n, spine: [a, b] }` represents `xn a b`
-    Neutral {
+    ReadbackClosure {
         head: usize,
         spine: Vec<HeapPtr>,
     },
@@ -71,7 +71,7 @@ pub enum ForceMode {
 // - env: captured HeapPtrs, explicit instead of relying on Rust's move captures
 // - code: plain fn pointer, no dynamic dispatch
 #[derive(Clone)]
-pub struct Closure {
+pub struct RustClosure {
     env: Vec<HeapPtr>,
     code: fn(*const HeapPtr, HeapPtr, &Runtime) -> HeapPtr,
 }
@@ -120,7 +120,7 @@ impl Runtime {
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
-            HeapObj::Closure(c) => (c.code)(c.env.as_ptr(), arg, self),
+            HeapObj::RustClosure(c) => (c.code)(c.env.as_ptr(), arg, self),
             HeapObj::ExprClosure(tc) => {
                 let mut env = tc.env;
                 let None = env.insert(tc.param.clone(), arg) else {
@@ -128,9 +128,9 @@ impl Runtime {
                 };
                 self.expr(&env, &tc.body)
             }
-            HeapObj::Neutral { head, mut spine } => {
+            HeapObj::ReadbackClosure { head, mut spine } => {
                 spine.push(arg);
-                self.alloc(HeapObj::Neutral { head, spine })
+                self.alloc(HeapObj::ReadbackClosure { head, spine })
             }
             _ => panic!("expected closure"),
         }
@@ -212,7 +212,7 @@ impl Runtime {
         // 3. We ensure env.len() == N when calling
         let code: fn(*const HeapPtr, HeapPtr, &Runtime) -> HeapPtr =
             unsafe { std::mem::transmute(f) };
-        self.alloc(HeapObj::Closure(Closure {
+        self.alloc(HeapObj::RustClosure(RustClosure {
             env: env.to_vec(),
             code,
         }))
@@ -290,8 +290,8 @@ impl Runtime {
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
         match obj {
-            HeapObj::Closure(_) | HeapObj::ExprClosure(_) => {
-                let var = self.alloc(HeapObj::Neutral {
+            HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
+                let var = self.alloc(HeapObj::ReadbackClosure {
                     head: depth,
                     spine: vec![],
                 });
@@ -302,7 +302,7 @@ impl Runtime {
                     body: Box::new(self.readback(body, depth + 1)),
                 }
             }
-            HeapObj::Neutral { head, spine } => {
+            HeapObj::ReadbackClosure { head, spine } => {
                 let mut expr = Expr::Var(Var::new(format!("x{head}")));
                 for arg in spine {
                     expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
