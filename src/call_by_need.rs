@@ -264,6 +264,12 @@ impl Runtime {
             Expr::Plus => self.plus(),
         }
     }
+
+    /// Parse and evaluate an expression string.
+    #[must_use]
+    pub fn run(&self, src: &str) -> HeapPtr {
+        self.expr(&HashMap::new(), &expr_parser::parse(src))
+    }
 }
 
 // ============================================================================
@@ -475,222 +481,63 @@ mod test {
     }
 
     // =========================================================================
-    // FOAS tests: Term-based explicit lambda calculus
+    // FOAS tests: parsed lambda calculus expressions
     // =========================================================================
 
-    use crate::{Expr, Var};
+    use crate::{expr_parser::parse, Var};
     use std::collections::HashMap;
 
-    // -------------------------------------------------------------------------
-    // Basic FOAS: (\x -> x) 5 = 5
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let x = Var::new("x");
-        // \x. x
-        let id = Expr::Lam {
-            captures: vec![],
-            param: x.clone(),
-            body: Box::new(Expr::Var(x)),
-        };
-        // (\x. x) 5
-        let expr = Expr::App(Box::new(id), Box::new(Expr::Int(5)));
-        let ptr = rt.expr(&HashMap::new(), &expr);
-        assert_eq!(rt.get_i32(ptr), 5);
+        assert_eq!(rt.get_i32(rt.run(r"(\[] x. x) 5")), 5);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS free variable: expr with free var looked up in env
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_free_var(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let x = Var::new("x");
-
-        // Term with free variable: just `x`
-        let expr = Expr::Var(x.clone());
-
-        // Provide binding in env
-        let env = HashMap::from([(x, rt.i32(42))]);
-
-        assert_eq!(rt.get_i32(rt.expr(&env, &expr)), 42);
+        let env = HashMap::from([(Var::new("x"), rt.i32(42))]);
+        assert_eq!(rt.get_i32(rt.expr(&env, &parse("x"))), 42);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS capture from env: \y. x captures x from outer env
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_capture_from_env(
         #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
     ) {
         let rt = Runtime::new(mode);
-        let x = Var::new("x");
-        let y = Var::new("y");
-
-        // \y. x (captures x from env, ignores param y)
-        let expr = Expr::Lam {
-            captures: vec![x.clone()],
-            param: y,
-            body: Box::new(Expr::Var(x.clone())),
-        };
-
-        let env = HashMap::from([(x, rt.i32(100))]);
-
-        let closure = rt.expr(&env, &expr);
-        let result = rt.app(closure, rt.i32(999)); // arg ignored
+        let env = HashMap::from([(Var::new("x"), rt.i32(100))]);
+        let closure = rt.expr(&env, &parse(r"\[x] y. x"));
+        let result = rt.app(closure, rt.i32(999));
         assert_eq!(rt.get_i32(result), 100);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS plus: plus 3 4 = 7
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_plus(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        // plus 3 4
-        let expr = Expr::App(
-            Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(3)))),
-            Box::new(Expr::Int(4)),
-        );
-        let ptr = rt.expr(&HashMap::new(), &expr);
-        assert_eq!(rt.get_i32(ptr), 7);
+        assert_eq!(rt.get_i32(rt.run("+ 3 4")), 7);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS currying: fst 5 6 = 5, snd 5 6 = 6
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_fst_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-
-        // fst = \x.\y. x
-        let x = Var::new("x");
-        let y = Var::new("y");
-        let fst = Expr::Lam {
-            captures: vec![],
-            param: x.clone(),
-            body: Box::new(Expr::Lam {
-                captures: vec![x.clone()],
-                param: y.clone(),
-                body: Box::new(Expr::Var(x.clone())),
-            }),
-        };
-
-        // snd = \x.\y. y
-        let x2 = Var::new("x");
-        let y2 = Var::new("y");
-        let snd = Expr::Lam {
-            captures: vec![],
-            param: x2,
-            body: Box::new(Expr::Lam {
-                captures: vec![],
-                param: y2.clone(),
-                body: Box::new(Expr::Var(y2)),
-            }),
-        };
-
-        // fst 5 6 = 5
-        let fst_app = Expr::App(
-            Box::new(Expr::App(Box::new(fst), Box::new(Expr::Int(5)))),
-            Box::new(Expr::Int(6)),
-        );
-        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &fst_app)), 5);
-
-        // snd 5 6 = 6
-        let snd_app = Expr::App(
-            Box::new(Expr::App(Box::new(snd), Box::new(Expr::Int(5)))),
-            Box::new(Expr::Int(6)),
-        );
-        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &snd_app)), 6);
+        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[x] y. x) 5 6")), 5);
+        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[] y. y) 5 6")), 6);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS laziness: const 42 (plus 1 2) doesn't evaluate plus
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_laziness(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-
-        // const = \x.\y. x
-        let x = Var::new("x");
-        let y = Var::new("y");
-        let const_fn = Expr::Lam {
-            captures: vec![],
-            param: x.clone(),
-            body: Box::new(Expr::Lam {
-                captures: vec![x.clone()],
-                param: y,
-                body: Box::new(Expr::Var(x)),
-            }),
-        };
-
-        // const 42 (plus 1 2) - second arg never evaluated
-        let expr = Expr::App(
-            Box::new(Expr::App(Box::new(const_fn), Box::new(Expr::Int(42)))),
-            Box::new(Expr::App(
-                Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(1)))),
-                Box::new(Expr::Int(2)),
-            )),
-        );
-
-        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &expr)), 42);
+        // const 42 (+ 1 2) - second arg never evaluated
+        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[x] y. x) 42 (+ 1 2)")), 42);
     }
 
-    // -------------------------------------------------------------------------
-    // FOAS SKI: S K K x = x
-    // -------------------------------------------------------------------------
     #[rstest]
     fn foas_ski(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-
-        // K = \x.\y. x
-        let kx = Var::new("x");
-        let ky = Var::new("y");
-        let k = Expr::Lam {
-            captures: vec![],
-            param: kx.clone(),
-            body: Box::new(Expr::Lam {
-                captures: vec![kx.clone()],
-                param: ky,
-                body: Box::new(Expr::Var(kx)),
-            }),
-        };
-
-        // S = \x.\y.\z. x z (y z)
-        let sx = Var::new("x");
-        let sy = Var::new("y");
-        let sz = Var::new("z");
-        let s = Expr::Lam {
-            captures: vec![],
-            param: sx.clone(),
-            body: Box::new(Expr::Lam {
-                captures: vec![sx.clone()],
-                param: sy.clone(),
-                body: Box::new(Expr::Lam {
-                    captures: vec![sx.clone(), sy.clone()],
-                    param: sz.clone(),
-                    body: Box::new(Expr::App(
-                        Box::new(Expr::App(
-                            Box::new(Expr::Var(sx)),
-                            Box::new(Expr::Var(sz.clone())),
-                        )),
-                        Box::new(Expr::App(Box::new(Expr::Var(sy)), Box::new(Expr::Var(sz)))),
-                    )),
-                }),
-            }),
-        };
-
         // S K K 42 = 42
-        let skk_42 = Expr::App(
-            Box::new(Expr::App(
-                Box::new(Expr::App(Box::new(s), Box::new(k.clone()))),
-                Box::new(k),
-            )),
-            Box::new(Expr::Int(42)),
-        );
-
-        assert_eq!(rt.get_i32(rt.expr(&HashMap::new(), &skk_42)), 42);
+        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
+        let k = r"\[] x. \[x] y. x";
+        assert_eq!(rt.get_i32(rt.run(&format!("({s}) ({k}) ({k}) 42"))), 42);
     }
 }
 
