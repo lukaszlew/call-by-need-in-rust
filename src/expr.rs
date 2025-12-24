@@ -7,4 +7,6 @@ pub enum Expr {
         body: Box<Expr>,
     },
     App(Box<Expr>, Box<Expr>),
+    Int(i32),
+    Plus,
 }

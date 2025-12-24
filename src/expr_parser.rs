@@ -36,7 +36,18 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         let parens = expr.delimited_by(just('('), just(')')).padded();
 
-        let atom = lambda.or(parens).or(var);
+        let int = just('-')
+            .or_not()
+            .then(text::int(10))
+            .map(|(neg, s): (Option<char>, String)| {
+                let n: i32 = s.parse().unwrap();
+                Expr::Int(if neg.is_some() { -n } else { n })
+            })
+            .padded();
+
+        let plus = just('+').to(Expr::Plus).padded();
+
+        let atom = lambda.or(parens).or(int).or(plus).or(var);
 
         atom.clone()
             .then(atom.repeated())
@@ -147,6 +158,30 @@ mod tests {
                 param: "x".into(),
                 body: Box::new(Expr::Var("x".into())),
             }
+        );
+    }
+
+    #[test]
+    fn parse_int() {
+        assert_eq!(parse("42"), Expr::Int(42));
+        assert_eq!(parse("-5"), Expr::Int(-5));
+        assert_eq!(parse("  123  "), Expr::Int(123));
+    }
+
+    #[test]
+    fn parse_plus() {
+        assert_eq!(parse("+"), Expr::Plus);
+    }
+
+    #[test]
+    fn parse_plus_application() {
+        // + 1 2 = ((+ 1) 2)
+        assert_eq!(
+            parse("+ 1 2"),
+            Expr::App(
+                Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(1)))),
+                Box::new(Expr::Int(2)),
+            )
         );
     }
 }
