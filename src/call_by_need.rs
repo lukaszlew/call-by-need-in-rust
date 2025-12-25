@@ -6,8 +6,28 @@ use std::collections::HashMap;
 
 pub use expr::{Expr, Var};
 
-/// ExprClosure: runtime representation of a FOAS lambda.
-/// Body remains as Expr, evaluated on application.
+/// Environment mapping variable names to heap pointers.
+pub type Env = HashMap<Var, HeapPtr>;
+
+/// Extension trait for convenient Env access in closures.
+pub trait EnvExt {
+    fn v(&self, name: &str) -> HeapPtr;
+}
+
+impl EnvExt for Env {
+    fn v(&self, name: &str) -> HeapPtr {
+        self[&Var::new(name)]
+    }
+}
+
+/// The body of a closure - either Rust code or an Expr.
+#[derive(Clone)]
+pub enum ClosureBody {
+    Rust(fn(&Env, &Runtime) -> HeapPtr),
+    Expr(Expr),
+}
+
+/// Runtime representation of a lambda.
 ///
 /// # Lexical Scoping
 /// Each closure captures its environment at creation time (the `env` field).
@@ -21,11 +41,11 @@ pub use expr::{Expr, Var};
 /// 3. Variable lookup goes through `env`, not through textual substitution
 ///
 /// This environment-based approach sidesteps capture issues entirely.
-#[derive(Clone, Debug)]
-pub struct ExprClosure {
+#[derive(Clone)]
+pub struct Closure {
     pub param: Var,
-    pub body: Expr,
-    pub env: HashMap<Var, HeapPtr>,
+    pub env: Env,
+    pub body: ClosureBody,
 }
 
 // HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
@@ -36,8 +56,7 @@ pub struct ExprClosure {
 pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
-    RustClosure(RustClosure),
-    ExprClosure(ExprClosure),
+    Closure(Closure),
     ReadbackFreeVar {
         /// `{ var: Var("x0"), spine: [a, b] }` represents `x0 a b`
         var: Var,
@@ -64,25 +83,6 @@ pub enum ForceMode {
     Recursive,
     #[default]
     Iterative,
-}
-
-/// Extension trait for convenient HashMap access in closures.
-pub trait EnvExt {
-    fn v(&self, name: &str) -> HeapPtr;
-}
-
-impl EnvExt for HashMap<Var, HeapPtr> {
-    fn v(&self, name: &str) -> HeapPtr {
-        self[&Var::new(name)]
-    }
-}
-
-/// Closure with explicit environment - same representation as ExprClosure.
-#[derive(Clone)]
-pub struct RustClosure {
-    param: Var,
-    env: HashMap<Var, HeapPtr>,
-    code: fn(&HashMap<Var, HeapPtr>, &Runtime) -> HeapPtr,
 }
 
 // =============================================================================
@@ -135,19 +135,15 @@ impl Runtime {
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
-            HeapObj::RustClosure(c) => {
+            HeapObj::Closure(c) => {
                 let mut env = c.env;
                 let None = env.insert(c.param.clone(), arg) else {
                     panic!("param {:?} shadows capture", c.param)
                 };
-                (c.code)(&env, self)
-            }
-            HeapObj::ExprClosure(c) => {
-                let mut env = c.env;
-                let None = env.insert(c.param.clone(), arg) else {
-                    panic!("param {:?} shadows capture", c.param)
-                };
-                self.expr(&env, &c.body)
+                match c.body {
+                    ClosureBody::Rust(code) => code(&env, self),
+                    ClosureBody::Expr(body) => self.expr(&env, &body),
+                }
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
                 spine.push(arg);
@@ -218,7 +214,7 @@ impl Runtime {
         ptr
     }
 
-    /// Create a RustClosure with explicit environment.
+    /// Create a Closure with Rust code body.
     /// `param` is the name for the argument when the closure is applied.
     /// `env` is a list of (name, value) pairs to capture.
     /// Access variables in the closure via `env.v("name")`.
@@ -227,12 +223,12 @@ impl Runtime {
         &self,
         param: &str,
         env: &[(&str, HeapPtr)],
-        f: fn(&HashMap<Var, HeapPtr>, &Runtime) -> HeapPtr,
+        f: fn(&Env, &Runtime) -> HeapPtr,
     ) -> HeapPtr {
-        self.alloc(HeapObj::RustClosure(RustClosure {
+        self.alloc(HeapObj::Closure(Closure {
             param: Var::new(param),
             env: env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
-            code: f,
+            body: ClosureBody::Rust(f),
         }))
     }
 
@@ -265,7 +261,7 @@ impl Runtime {
     /// Allocate a Term with the given environment, producing a HeapPtr.
     /// Signature: (env, expr) mirrors Rust closure calls where env comes first.
     #[must_use]
-    pub fn expr(&self, env: &HashMap<Var, HeapPtr>, expr: &Expr) -> HeapPtr {
+    pub fn expr(&self, env: &Env, expr: &Expr) -> HeapPtr {
         match expr {
             // Lexical scoping: look up in the provided env, not any "current" env.
             Expr::Var(v) => env[v],
@@ -281,16 +277,16 @@ impl Runtime {
             // Capture current bindings into closure's env - this is where
             // lexical scoping happens. The closure remembers its definition site.
             Expr::Lam { param, body } => {
-                let closure_env: HashMap<Var, HeapPtr> = body
+                let closure_env: Env = body
                     .free_vars()
                     .into_iter()
                     .filter(|v| v != param)
                     .map(|v| (v.clone(), env[&v]))
                     .collect();
-                self.alloc(HeapObj::ExprClosure(ExprClosure {
+                self.alloc(HeapObj::Closure(Closure {
                     param: param.clone(),
-                    body: (**body).clone(),
                     env: closure_env,
+                    body: ClosureBody::Expr((**body).clone()),
                 }))
             }
             Expr::Plus => self.plus(),
@@ -313,7 +309,7 @@ impl Runtime {
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
         match obj {
-            HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
+            HeapObj::Closure(_) => {
                 let param = Var::new(format!("x{depth}"));
                 let free_var = self.alloc(HeapObj::ReadbackFreeVar {
                     var: param.clone(),
