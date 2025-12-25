@@ -66,13 +66,23 @@ pub enum ForceMode {
     Iterative,
 }
 
-// Closure with explicit environment.
-// - env: captured HeapPtrs, explicit instead of relying on Rust's move captures
-// - code: plain fn pointer, no dynamic dispatch
+/// Extension trait for convenient HashMap access in closures.
+pub trait EnvExt {
+    fn v(&self, name: &str) -> HeapPtr;
+}
+
+impl EnvExt for HashMap<Var, HeapPtr> {
+    fn v(&self, name: &str) -> HeapPtr {
+        self[&Var::new(name)]
+    }
+}
+
+/// Closure with explicit environment - same representation as ExprClosure.
 #[derive(Clone)]
 pub struct RustClosure {
-    env: Vec<HeapPtr>,
-    code: fn(*const HeapPtr, HeapPtr, &Runtime) -> HeapPtr,
+    param: Var,
+    env: HashMap<Var, HeapPtr>,
+    code: fn(&HashMap<Var, HeapPtr>, &Runtime) -> HeapPtr,
 }
 
 // =============================================================================
@@ -125,13 +135,19 @@ impl Runtime {
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
-            HeapObj::RustClosure(c) => (c.code)(c.env.as_ptr(), arg, self),
-            HeapObj::ExprClosure(tc) => {
-                let mut env = tc.env;
-                let None = env.insert(tc.param.clone(), arg) else {
-                    panic!("param {:?} shadows capture", tc.param)
+            HeapObj::RustClosure(c) => {
+                let mut env = c.env;
+                let None = env.insert(c.param.clone(), arg) else {
+                    panic!("param {:?} shadows capture", c.param)
                 };
-                self.expr(&env, &tc.body)
+                (c.code)(&env, self)
+            }
+            HeapObj::ExprClosure(c) => {
+                let mut env = c.env;
+                let None = env.insert(c.param.clone(), arg) else {
+                    panic!("param {:?} shadows capture", c.param)
+                };
+                self.expr(&env, &c.body)
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
                 spine.push(arg);
@@ -202,24 +218,21 @@ impl Runtime {
         ptr
     }
 
-    /// Create HeapPtr for the given fn pointer with explicit environment.
-    /// Use array patterns to destructure env: `rt.lambda([a, b], |&[a, b], x, rt| ...)`
+    /// Create a RustClosure with explicit environment.
+    /// `param` is the name for the argument when the closure is applied.
+    /// `env` is a list of (name, value) pairs to capture.
+    /// Access variables in the closure via `env.v("name")`.
     #[must_use]
-    pub fn lam<const N: usize>(
+    pub fn lam(
         &self,
-        env: [HeapPtr; N],
-        f: fn(&[HeapPtr; N], HeapPtr, &Runtime) -> HeapPtr,
+        param: &str,
+        env: &[(&str, HeapPtr)],
+        f: fn(&HashMap<Var, HeapPtr>, &Runtime) -> HeapPtr,
     ) -> HeapPtr {
-        // SAFETY: We store the fn pointer as taking &[HeapPtr] (slice) instead of &[HeapPtr; N].
-        // This works because:
-        // 1. We pass env.as_ptr() which gives the same raw pointer for both types
-        // 2. The calling convention for &[T; N] and *const T is the same (thin pointer)
-        // 3. We ensure env.len() == N when calling
-        let code: fn(*const HeapPtr, HeapPtr, &Runtime) -> HeapPtr =
-            unsafe { std::mem::transmute(f) };
         self.alloc(HeapObj::RustClosure(RustClosure {
-            env: env.to_vec(),
-            code,
+            param: Var::new(param),
+            env: env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
+            code: f,
         }))
     }
 
@@ -238,8 +251,10 @@ impl Runtime {
     /// plus = \a.\b. a + b (primitive addition for i32)
     #[must_use]
     pub fn plus(&self) -> HeapPtr {
-        self.lam([], |&[], a, rt| {
-            rt.lam([a], |&[a], b, rt| rt.i32(rt.get_i32(a) + rt.get_i32(b)))
+        self.lam("a", &[], |env, rt| {
+            rt.lam("b", &[("a", env.v("a"))], |env, rt| {
+                rt.i32(rt.get_i32(env.v("a")) + rt.get_i32(env.v("b")))
+            })
         })
     }
 
@@ -328,23 +343,23 @@ impl Runtime {
 // ============================================================================
 #[cfg(test)]
 mod test {
-    use crate::{ForceMode, HeapPtr, Runtime};
+    use crate::{EnvExt, ForceMode, HeapPtr, Runtime};
     use rstest::rstest;
 
     /// Create an increment function that increments counter when called.
     fn counted_inc(rt: &Runtime, counter: HeapPtr) -> HeapPtr {
-        rt.lam([counter], |&[counter], x, rt| {
-            rt.set_i32(counter, rt.get_i32(counter) + 1);
-            rt.i32(rt.get_i32(x) + 1)
+        rt.lam("x", &[("counter", counter)], |env, rt| {
+            rt.set_i32(env.v("counter"), rt.get_i32(env.v("counter")) + 1);
+            rt.i32(rt.get_i32(env.v("x")) + 1)
         })
     }
 
     /// Create a thunk that returns `val` and increments counter when forced.
     fn counted_const(rt: &Runtime, counter: HeapPtr, val: i32) -> HeapPtr {
         let val_ptr = rt.i32(val);
-        rt.lam([counter, val_ptr], |&[counter, val_ptr], _, rt| {
-            rt.set_i32(counter, rt.get_i32(counter) + 1);
-            rt.i32(rt.get_i32(val_ptr))
+        rt.lam("_", &[("counter", counter), ("val", val_ptr)], |env, rt| {
+            rt.set_i32(env.v("counter"), rt.get_i32(env.v("counter")) + 1);
+            rt.i32(rt.get_i32(env.v("val")))
         })
     }
 
@@ -354,7 +369,7 @@ mod test {
     #[rstest]
     fn identity_applied(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let t = rt.app(rt.lam([], |&[], x, _rt| x), rt.i32(5));
+        let t = rt.app(rt.lam("x", &[], |env, _rt| env.v("x")), rt.i32(5));
         assert_eq!(rt.get_i32(t), 5);
     }
 
@@ -377,8 +392,8 @@ mod test {
     #[rstest]
     fn fst_and_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let fst = rt.lam([], |&[], x, rt| rt.lam([x], |&[x], _y, _rt| x));
-        let snd = rt.lam([], |&[], _x, rt| rt.lam([], |&[], y, _rt| y));
+        let fst = rt.lam("x", &[], |env, rt| rt.lam("y", &[("x", env.v("x"))], |env, _rt| env.v("x")));
+        let snd = rt.lam("x", &[], |_env, rt| rt.lam("y", &[], |env, _rt| env.v("y")));
 
         assert_eq!(rt.get_i32(rt.app(rt.app(fst, rt.i32(5)), rt.i32(6))), 5);
         assert_eq!(rt.get_i32(rt.app(rt.app(snd, rt.i32(5)), rt.i32(6))), 6);
@@ -397,7 +412,7 @@ mod test {
         let expensive = counted_const(&rt, counter, 999);
 
         // const = \x.\y. x (ignores second argument)
-        let const_fn = rt.lam([], |&[], x, rt| rt.lam([x], |&[x], _y, _rt| x));
+        let const_fn = rt.lam("x", &[], |env, rt| rt.lam("y", &[("x", env.v("x"))], |env, _rt| env.v("x")));
 
         let unused_thunk = rt.app(expensive, rt.i32(0));
         let result = rt.app(rt.app(const_fn, rt.i32(42)), unused_thunk);
@@ -417,7 +432,9 @@ mod test {
         let inc = counted_inc(&rt, counter);
 
         // inc_twice = \n. inc (inc n)
-        let inc_twice = rt.lam([inc], |&[inc], n, rt| rt.app(inc, rt.app(inc, n)));
+        let inc_twice = rt.lam("n", &[("inc", inc)], |env, rt| {
+            rt.app(env.v("inc"), rt.app(env.v("inc"), env.v("n")))
+        });
         let hopefully_12 = rt.app(inc_twice, rt.i32(10));
 
         assert_eq!(rt.get_i32(counter), 0);
@@ -456,16 +473,18 @@ mod test {
     #[rstest]
     fn church_numerals(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let zero = rt.lam([], |&[], _f, rt| rt.lam([], |&[], x, _rt| x));
+        let zero = rt.lam("f", &[], |_env, rt| rt.lam("x", &[], |env, _rt| env.v("x")));
 
-        let succ = rt.lam([], |&[], n, rt| {
-            rt.lam([n], |&[n], f, rt| {
-                rt.lam([n, f], |&[n, f], x, rt| rt.app(f, rt.app(rt.app(n, f), x)))
+        let succ = rt.lam("n", &[], |env, rt| {
+            rt.lam("f", &[("n", env.v("n"))], |env, rt| {
+                rt.lam("x", &[("n", env.v("n")), ("f", env.v("f"))], |env, rt| {
+                    rt.app(env.v("f"), rt.app(rt.app(env.v("n"), env.v("f")), env.v("x")))
+                })
             })
         });
 
         // Convert church numeral to i32: apply n to inc and 0
-        let inc = rt.lam([], |&[], x, rt| rt.i32(rt.get_i32(x) + 1));
+        let inc = rt.lam("x", &[], |env, rt| rt.i32(rt.get_i32(env.v("x")) + 1));
         let to_int =
             |n: &HeapPtr| -> i32 { rt.get_i32(rt.app(rt.app(n.clone(), inc.clone()), rt.i32(0))) };
 
@@ -489,13 +508,13 @@ mod test {
     #[rstest]
     fn ski_combinators(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let i_comb = rt.lam([], |&[], x, _rt| x);
-        let k_comb = rt.lam([], |&[], x, rt| rt.lam([x], |&[x], _y, _rt| x));
-        let s_comb = rt.lam([], |&[], x, rt| {
-            rt.lam([x], |&[x], y, rt| {
-                rt.lam([x, y], |&[x, y], z, rt| {
-                    let xz = rt.app(x, z);
-                    let yz = rt.app(y, z);
+        let i_comb = rt.lam("x", &[], |env, _rt| env.v("x"));
+        let k_comb = rt.lam("x", &[], |env, rt| rt.lam("y", &[("x", env.v("x"))], |env, _rt| env.v("x")));
+        let s_comb = rt.lam("x", &[], |env, rt| {
+            rt.lam("y", &[("x", env.v("x"))], |env, rt| {
+                rt.lam("z", &[("x", env.v("x")), ("y", env.v("y"))], |env, rt| {
+                    let xz = rt.app(env.v("x"), env.v("z"));
+                    let yz = rt.app(env.v("y"), env.v("z"));
                     rt.app(xz, yz)
                 })
             })
@@ -517,13 +536,14 @@ mod test {
 
     // -------------------------------------------------------------------------
     // Deep currying: f = \a.\b.\c. a
-    // With explicit env, no more awkward cloning!
     // -------------------------------------------------------------------------
     #[rstest]
     fn deep_currying(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let f = rt.lam([], |&[], a, rt| {
-            rt.lam([a], |&[a], _b, rt| rt.lam([a], |&[a], _c, _rt| a))
+        let f = rt.lam("a", &[], |env, rt| {
+            rt.lam("b", &[("a", env.v("a"))], |env, rt| {
+                rt.lam("c", &[("a", env.v("a"))], |env, _rt| env.v("a"))
+            })
         });
         assert_eq!(
             rt.get_i32(rt.app(rt.app(rt.app(f, rt.i32(1)), rt.i32(2)), rt.i32(3))),
