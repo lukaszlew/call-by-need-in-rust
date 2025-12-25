@@ -20,11 +20,12 @@ impl EnvExt for Env {
     }
 }
 
-/// The body of a closure - either Rust code or an Expr.
+/// The body of a closure - either Rust code or pre-allocated HeapPtr code.
 #[derive(Clone)]
 pub enum ClosureBody {
     Rust(fn(&Env, &Runtime) -> HeapPtr),
-    Expr(Expr),
+    /// Pre-allocated body with Param holes for variables.
+    Code(HeapPtr),
 }
 
 /// Runtime representation of a lambda.
@@ -57,6 +58,8 @@ pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
     Closure(Closure),
+    /// Variable hole, resolved via env in eval_code.
+    Param(Var),
     ReadbackFreeVar {
         /// `{ var: Var("x0"), spine: [a, b] }` represents `x0 a b`
         var: Var,
@@ -142,7 +145,7 @@ impl Runtime {
                 };
                 match c.body {
                     ClosureBody::Rust(code) => code(&env, self),
-                    ClosureBody::Expr(body) => self.expr(&env, &body),
+                    ClosureBody::Code(body) => self.eval_code(body, &env),
                 }
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
@@ -258,39 +261,58 @@ impl Runtime {
     // FOAS: Term execution
     // -------------------------------------------------------------------------
 
-    /// Allocate a Term with the given environment, producing a HeapPtr.
-    /// Signature: (env, expr) mirrors Rust closure calls where env comes first.
-    #[must_use]
-    pub fn expr(&self, env: &Env, expr: &Expr) -> HeapPtr {
+    /// Evaluate pre-allocated code with environment.
+    fn eval_code(&self, ptr: HeapPtr, env: &Env) -> HeapPtr {
+        let obj = self.objects.borrow()[ptr.0].clone();
+        match obj {
+            HeapObj::Param(v) => env[&v],
+            HeapObj::App(f, g) => {
+                let f_ptr = self.eval_code(f, env);
+                let g_ptr = self.eval_code(g, env);
+                self.app(f_ptr, g_ptr)
+            }
+            HeapObj::Closure(mut c) => {
+                assert!(c.env.is_empty(), "closure env must be empty (from expr_impl)");
+                // Capture env into closure
+                for (var, val) in env {
+                    if var != &c.param {
+                        c.env.insert(var.clone(), *val);
+                    }
+                }
+                self.alloc(HeapObj::Closure(c))
+            }
+            HeapObj::I32(_) | HeapObj::ReadbackFreeVar { .. } => ptr,
+        }
+    }
+
+    /// Allocate Expr to heap. All Vars become Param holes.
+    fn expr_impl(&self, expr: &Expr) -> HeapPtr {
         match expr {
-            // Lexical scoping: look up in the provided env, not any "current" env.
-            Expr::Var(v) => env[v],
+            Expr::Var(v) => self.alloc(HeapObj::Param(v.clone())),
             Expr::Int(n) => self.i32(*n),
             Expr::App { head, spine } => {
-                let mut ptr = self.expr(env, head);
+                let mut ptr = self.expr_impl(head);
                 for arg in spine {
-                    let arg_ptr = self.expr(env, arg);
-                    ptr = self.app(ptr, arg_ptr);
+                    ptr = self.app(ptr, self.expr_impl(arg));
                 }
                 ptr
             }
-            // Capture current bindings into closure's env - this is where
-            // lexical scoping happens. The closure remembers its definition site.
             Expr::Lam { param, body } => {
-                let closure_env: Env = body
-                    .free_vars()
-                    .into_iter()
-                    .filter(|v| v != param)
-                    .map(|v| (v.clone(), env[&v]))
-                    .collect();
+                let body_ptr = self.expr_impl(body);
                 self.alloc(HeapObj::Closure(Closure {
                     param: param.clone(),
-                    env: closure_env,
-                    body: ClosureBody::Expr((**body).clone()),
+                    env: HashMap::new(),
+                    body: ClosureBody::Code(body_ptr),
                 }))
             }
             Expr::Plus => self.plus(),
         }
+    }
+
+    /// Allocate a Term with the given environment, producing a HeapPtr.
+    #[must_use]
+    pub fn expr(&self, env: &Env, expr: &Expr) -> HeapPtr {
+        self.eval_code(self.expr_impl(expr), env)
     }
 
     /// Parse and evaluate an expression string.
@@ -324,6 +346,7 @@ impl Runtime {
             ),
             HeapObj::I32(n) => Expr::Int(n),
             HeapObj::App(_, _) => panic!("unevaluated App in readback"),
+            HeapObj::Param(v) => panic!("unresolved Param({v:?}) in readback"),
         }
     }
 
