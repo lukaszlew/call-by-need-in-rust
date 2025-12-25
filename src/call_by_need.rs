@@ -306,8 +306,8 @@ impl Runtime {
                     body,
                 }
             }
-            HeapObj::ReadbackFreeVar { param: head, spine } => {
-                let mut expr = Expr::Var(head);
+            HeapObj::ReadbackFreeVar { param, spine } => {
+                let mut expr = Expr::Var(param);
                 for arg in spine {
                     expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
                 }
