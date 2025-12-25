@@ -1,6 +1,8 @@
 What could we do next?
 - we need more tests before sharing and for that we need a parser and eq tester and perhaps readback
 - lam
+- call by push value
+- tail call optimization
 - How to change enum Value to union Value? Rc is in a way. ManualDrop?
 - Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
 - Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
