@@ -84,4 +84,91 @@ impl Expr {
             body: Box::new(body),
         }
     }
+
+    /// Rename free occurrences of `from` to `to`.
+    /// Respects shadowing: if `from` is bound by an inner lambda, don't rename inside it.
+    pub fn rename(&self, from: &Var, to: &Var) -> Expr {
+        match self {
+            Expr::Var(v) if v == from => Expr::Var(to.clone()),
+            Expr::Var(v) => Expr::Var(v.clone()),
+            Expr::Lam { param, body } => {
+                if param == from {
+                    // from is shadowed, don't rename in body
+                    self.clone()
+                } else {
+                    Expr::Lam {
+                        param: param.clone(),
+                        body: Box::new(body.rename(from, to)),
+                    }
+                }
+            }
+            Expr::App { head, spine } => Expr::App {
+                head: Box::new(head.rename(from, to)),
+                spine: spine.iter().map(|e| e.rename(from, to)).collect(),
+            },
+            Expr::Int(_) | Expr::Plus => self.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_free_var() {
+        // x -> y
+        let expr = Expr::Var("x".into());
+        assert_eq!(expr.rename(&"x".into(), &"y".into()), Expr::Var("y".into()));
+    }
+
+    #[test]
+    fn rename_different_var() {
+        // z unchanged when renaming x -> y
+        let expr = Expr::Var("z".into());
+        assert_eq!(expr.rename(&"x".into(), &"y".into()), Expr::Var("z".into()));
+    }
+
+    #[test]
+    fn rename_in_body() {
+        // \y. x -> \y. z when renaming x -> z
+        let expr = Expr::lam("y".into(), Expr::Var("x".into()));
+        let expected = Expr::lam("y".into(), Expr::Var("z".into()));
+        assert_eq!(expr.rename(&"x".into(), &"z".into()), expected);
+    }
+
+    #[test]
+    fn rename_shadowed() {
+        // \x. x unchanged when renaming x -> y (x is bound)
+        let expr = Expr::lam("x".into(), Expr::Var("x".into()));
+        assert_eq!(expr.rename(&"x".into(), &"y".into()), expr);
+    }
+
+    #[test]
+    fn rename_nested_shadow() {
+        // \y. \x. x unchanged when renaming x -> z (x is bound by inner lambda)
+        let expr = Expr::lam("y".into(), Expr::lam("x".into(), Expr::Var("x".into())));
+        assert_eq!(expr.rename(&"x".into(), &"z".into()), expr);
+    }
+
+    #[test]
+    fn rename_partial_shadow() {
+        // \y. x (\x. x) -> \y. z (\x. x) when renaming x -> z
+        // The free x becomes z, but the bound x stays
+        let expr = Expr::lam(
+            "y".into(),
+            Expr::app(
+                Expr::Var("x".into()),
+                vec![Expr::lam("x".into(), Expr::Var("x".into()))],
+            ),
+        );
+        let expected = Expr::lam(
+            "y".into(),
+            Expr::app(
+                Expr::Var("z".into()),
+                vec![Expr::lam("x".into(), Expr::Var("x".into()))],
+            ),
+        );
+        assert_eq!(expr.rename(&"x".into(), &"z".into()), expected);
+    }
 }
