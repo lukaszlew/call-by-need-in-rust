@@ -59,7 +59,7 @@ impl HeapObj {
 pub struct HeapPtr(usize);
 
 /// Which force implementation to use.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum ForceMode {
     Recursive,
     #[default]
@@ -532,17 +532,11 @@ mod test {
     }
 
     // =========================================================================
-    // FOAS tests: parsed lambda calculus expressions
+    // Tests requiring env injection (can't be in txt files)
     // =========================================================================
 
     use crate::{expr_parser::parse, Var};
     use std::collections::HashMap;
-
-    #[rstest]
-    fn foas_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
-        let rt = Runtime::new(mode);
-        assert_eq!(rt.get_i32(rt.run(r"(\x. x) 5")), 5);
-    }
 
     #[rstest]
     fn foas_free_var(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
@@ -562,37 +556,8 @@ mod test {
         assert_eq!(rt.get_i32(result), 100);
     }
 
-    #[rstest]
-    fn foas_plus(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
-        let rt = Runtime::new(mode);
-        assert_eq!(rt.get_i32(rt.run("+ 3 4")), 7);
-    }
-
-    #[rstest]
-    fn foas_fst_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
-        let rt = Runtime::new(mode);
-        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. x) 5 6")), 5);
-        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. y) 5 6")), 6);
-    }
-
-    #[rstest]
-    fn foas_laziness(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
-        let rt = Runtime::new(mode);
-        // const 42 (+ 1 2) - second arg never evaluated
-        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. x) 42 (+ 1 2)")), 42);
-    }
-
-    #[rstest]
-    fn foas_ski(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
-        let rt = Runtime::new(mode);
-        // S K K 42 = 42
-        let s = r"\x. \y. \z. x z (y z)";
-        let k = r"\x. \y. x";
-        assert_eq!(rt.get_i32(rt.run(&format!("({s}) ({k}) ({k}) 42"))), 42);
-    }
-
     // =========================================================================
-    // NbE test: cases that can't be expressed in equality test files
+    // Tests requiring exact AST structure (can't be in txt files)
     // =========================================================================
 
     #[rstest]
@@ -628,8 +593,8 @@ pub struct TestStats {
 /// - `let NAME = expr` defines a binding (evaluated once, added to env)
 /// - `expr === expr` normalizes both and checks equality
 /// - Empty lines and lines starting with `//` are skipped.
-pub fn run_equality_tests(content: &str) -> Result<TestStats, String> {
-    let rt = Runtime::new(ForceMode::default());
+pub fn run_equality_tests(content: &str, mode: ForceMode) -> Result<TestStats, String> {
+    let rt = Runtime::new(mode);
     let mut env = HashMap::new();
     let mut stats = TestStats::default();
 
