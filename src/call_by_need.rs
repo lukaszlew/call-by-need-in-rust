@@ -859,3 +859,30 @@ mod test {
         assert_eq!(rt.normalize(expr1), rt.normalize(expr2));
     }
 }
+
+/// Run equality tests from a string.
+/// Format: each line is `expr === expr` (both normalized and compared).
+/// Empty lines and lines starting with `//` are skipped.
+pub fn run_equality_tests(content: &str) -> Result<(), String> {
+    let rt = Runtime::new(ForceMode::default());
+    for (line_num, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        let Some((left, right)) = line.split_once("===") else {
+            return Err(format!("line {}: missing `===`: {line}", line_num + 1));
+        };
+        let left = left.trim();
+        let right = right.trim();
+        let left_norm = rt.normalize(left);
+        let right_norm = rt.normalize(right);
+        if left_norm != right_norm {
+            return Err(format!(
+                "line {}: not equal\n  left:  {left}\n  right: {right}\n  left  normalized: {left_norm:?}\n  right normalized: {right_norm:?}",
+                line_num + 1
+            ));
+        }
+    }
+    Ok(())
+}
