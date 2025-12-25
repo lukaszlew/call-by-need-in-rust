@@ -39,8 +39,8 @@ pub enum HeapObj {
     RustClosure(RustClosure),
     ExprClosure(ExprClosure),
     ReadbackFreeVar {
-        /// `{ head: n, spine: [a, b] }` represents `xn a b`
-        head: usize,
+        /// `{ head: Var("x0"), spine: [a, b] }` represents `x0 a b`
+        param: Var,
         spine: Vec<HeapPtr>,
     },
 }
@@ -127,9 +127,12 @@ impl Runtime {
                 };
                 self.expr(&env, &tc.body)
             }
-            HeapObj::ReadbackFreeVar { head, mut spine } => {
+            HeapObj::ReadbackFreeVar {
+                param: head,
+                mut spine,
+            } => {
                 spine.push(arg);
-                self.alloc(HeapObj::ReadbackFreeVar { head, spine })
+                self.alloc(HeapObj::ReadbackFreeVar { param: head, spine })
             }
             _ => panic!("expected closure"),
         }
@@ -290,19 +293,21 @@ impl Runtime {
         let obj = self.force(ptr);
         match obj {
             HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
+                let param = Var::new(format!("x{depth}"));
                 let var = self.alloc(HeapObj::ReadbackFreeVar {
-                    head: depth,
+                    param: param.clone(),
                     spine: vec![],
                 });
-                let body = self.apply(obj, var);
+                let app = self.apply(obj, var);
+                let body = Box::new(self.readback(app, depth + 1));
                 Expr::Lam {
                     captures: vec![],
-                    param: Var::new(format!("x{depth}")),
-                    body: Box::new(self.readback(body, depth + 1)),
+                    param,
+                    body,
                 }
             }
-            HeapObj::ReadbackFreeVar { head, spine } => {
-                let mut expr = Expr::Var(Var::new(format!("x{head}")));
+            HeapObj::ReadbackFreeVar { param: head, spine } => {
+                let mut expr = Expr::Var(head);
                 for arg in spine {
                     expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
                 }
