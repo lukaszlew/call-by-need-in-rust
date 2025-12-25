@@ -1,6 +1,7 @@
 What could we do next?
 - we need more tests before sharing and for that we need a parser and eq tester and perhaps readback
 - lam
+- pairs
 - call by push value
 - tail call optimization
 - How to change enum Value to union Value? Rc is in a way. ManualDrop?
