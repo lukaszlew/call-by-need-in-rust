@@ -52,7 +52,7 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         atom.clone()
             .then(atom.repeated())
-            .foldl(|f, x| Expr::App(Box::new(f), Box::new(x)))
+            .map(|(head, spine)| Expr::app(head, spine))
     })
     .padded()
     .then_ignore(end())
@@ -96,24 +96,21 @@ mod tests {
     fn parse_app() {
         assert_eq!(
             parse("f x"),
-            Expr::App(
-                Box::new(Expr::Var("f".into())),
-                Box::new(Expr::Var("x".into())),
-            )
+            Expr::App {
+                head: Box::new(Expr::Var("f".into())),
+                spine: vec![Expr::Var("x".into())],
+            }
         );
     }
 
     #[test]
-    fn parse_app_left_assoc() {
+    fn parse_app_spine() {
         assert_eq!(
             parse("f x y"),
-            Expr::App(
-                Box::new(Expr::App(
-                    Box::new(Expr::Var("f".into())),
-                    Box::new(Expr::Var("x".into())),
-                )),
-                Box::new(Expr::Var("y".into())),
-            )
+            Expr::App {
+                head: Box::new(Expr::Var("f".into())),
+                spine: vec![Expr::Var("x".into()), Expr::Var("y".into())],
+            }
         );
     }
 
@@ -127,10 +124,10 @@ mod tests {
                 body: Box::new(Expr::Lam {
                     captures: vec!["f".into()],
                     param: "x".into(),
-                    body: Box::new(Expr::App(
-                        Box::new(Expr::Var("f".into())),
-                        Box::new(Expr::Var("x".into())),
-                    )),
+                    body: Box::new(Expr::App {
+                        head: Box::new(Expr::Var("f".into())),
+                        spine: vec![Expr::Var("x".into())],
+                    }),
                 }),
             }
         );
@@ -140,13 +137,13 @@ mod tests {
     fn parse_parens() {
         assert_eq!(
             parse("f (g x)"),
-            Expr::App(
-                Box::new(Expr::Var("f".into())),
-                Box::new(Expr::App(
-                    Box::new(Expr::Var("g".into())),
-                    Box::new(Expr::Var("x".into())),
-                )),
-            )
+            Expr::App {
+                head: Box::new(Expr::Var("f".into())),
+                spine: vec![Expr::App {
+                    head: Box::new(Expr::Var("g".into())),
+                    spine: vec![Expr::Var("x".into())],
+                }],
+            }
         );
     }
 
@@ -176,13 +173,13 @@ mod tests {
 
     #[test]
     fn parse_plus_application() {
-        // + 1 2 = ((+ 1) 2)
+        // + 1 2 = App { head: +, spine: [1, 2] }
         assert_eq!(
             parse("+ 1 2"),
-            Expr::App(
-                Box::new(Expr::App(Box::new(Expr::Plus), Box::new(Expr::Int(1)))),
-                Box::new(Expr::Int(2)),
-            )
+            Expr::App {
+                head: Box::new(Expr::Plus),
+                spine: vec![Expr::Int(1), Expr::Int(2)],
+            }
         );
     }
 }

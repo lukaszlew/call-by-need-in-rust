@@ -39,8 +39,8 @@ pub enum HeapObj {
     RustClosure(RustClosure),
     ExprClosure(ExprClosure),
     ReadbackFreeVar {
-        /// `{ head: Var("x0"), spine: [a, b] }` represents `x0 a b`
-        param: Var,
+        /// `{ var: Var("x0"), spine: [a, b] }` represents `x0 a b`
+        var: Var,
         spine: Vec<HeapPtr>,
     },
 }
@@ -127,12 +127,9 @@ impl Runtime {
                 };
                 self.expr(&env, &tc.body)
             }
-            HeapObj::ReadbackFreeVar {
-                param: head,
-                mut spine,
-            } => {
+            HeapObj::ReadbackFreeVar { var, mut spine } => {
                 spine.push(arg);
-                self.alloc(HeapObj::ReadbackFreeVar { param: head, spine })
+                self.alloc(HeapObj::ReadbackFreeVar { var, spine })
             }
             _ => panic!("expected closure"),
         }
@@ -252,10 +249,13 @@ impl Runtime {
             // Lexical scoping: look up in the provided env, not any "current" env.
             Expr::Var(v) => env[v],
             Expr::Int(n) => self.i32(*n),
-            Expr::App(f, x) => {
-                let f_ptr = self.expr(env, f);
-                let x_ptr = self.expr(env, x);
-                self.app(f_ptr, x_ptr)
+            Expr::App { head, spine } => {
+                let mut ptr = self.expr(env, head);
+                for arg in spine {
+                    let arg_ptr = self.expr(env, arg);
+                    ptr = self.app(ptr, arg_ptr);
+                }
+                ptr
             }
             // Capture current bindings into closure's env - this is where
             // lexical scoping happens. The closure remembers its definition site.
@@ -294,25 +294,21 @@ impl Runtime {
         match obj {
             HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
                 let param = Var::new(format!("x{depth}"));
-                let var = self.alloc(HeapObj::ReadbackFreeVar {
-                    param: param.clone(),
+                let free_var = self.alloc(HeapObj::ReadbackFreeVar {
+                    var: param.clone(),
                     spine: vec![],
                 });
-                let app = self.apply(obj, var);
-                let body = Box::new(self.readback(app, depth + 1));
+                let body = self.apply(obj, free_var);
                 Expr::Lam {
                     captures: vec![],
                     param,
-                    body,
+                    body: Box::new(self.readback(body, depth + 1)),
                 }
             }
-            HeapObj::ReadbackFreeVar { param, spine } => {
-                let mut expr = Expr::Var(param);
-                for arg in spine {
-                    expr = Expr::App(Box::new(expr), Box::new(self.readback(arg, depth)));
-                }
-                expr
-            }
+            HeapObj::ReadbackFreeVar { var, spine } => Expr::app(
+                Expr::Var(var),
+                spine.into_iter().map(|arg| self.readback(arg, depth)).collect(),
+            ),
             HeapObj::I32(n) => Expr::Int(n),
             HeapObj::App(_, _) => panic!("unevaluated App in readback"),
         }
@@ -645,14 +641,14 @@ mod test {
         let expected = crate::Expr::Lam {
             captures: vec![],
             param: Var::new("x0"),
-            body: Box::new(crate::Expr::App(
-                Box::new(crate::Expr::Var(Var::new("x0"))),
-                Box::new(crate::Expr::Lam {
+            body: Box::new(crate::Expr::App {
+                head: Box::new(crate::Expr::Var(Var::new("x0"))),
+                spine: vec![crate::Expr::Lam {
                     captures: vec![],
                     param: Var::new("x1"),
                     body: Box::new(crate::Expr::Var(Var::new("x1"))),
-                }),
-            )),
+                }],
+            }),
         };
         assert_eq!(result, expected);
     }

@@ -21,7 +21,37 @@ pub enum Expr {
         param: Var,
         body: Box<Expr>,
     },
-    App(Box<Expr>, Box<Expr>),
+    /// Application in spine form: `App { head, spine: [a, b, c] }` represents `head a b c`.
+    /// Invariant: `head` must not be `App` (use flat spine instead).
+    /// Invariant: `spine` must not be empty (use head directly instead).
+    App {
+        head: Box<Expr>,
+        spine: Vec<Expr>,
+    },
     Int(i32),
     Plus,
+}
+
+impl Expr {
+    /// Create an App, flattening if head is already an App.
+    /// Returns head unchanged if spine is empty.
+    pub fn app(head: Expr, mut spine: Vec<Expr>) -> Expr {
+        if spine.is_empty() {
+            return head;
+        }
+        match head {
+            // Flatten: (f a b) c d -> f a b c d
+            Expr::App {
+                head: h,
+                spine: mut s,
+            } => {
+                s.append(&mut spine);
+                Expr::App { head: h, spine: s }
+            }
+            head => Expr::App {
+                head: Box::new(head),
+                spine,
+            },
+        }
+    }
 }
