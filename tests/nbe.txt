@@ -1,0 +1,88 @@
+// Normalization by Evaluation tests
+
+// Combinators
+let I = \x. x
+let K = \x. \y. x
+let S = \x. \y. \z. x z (y z)
+let B = \f. \g. \x. f (g x)
+let C = \f. \x. \y. f y x
+
+// Church booleans
+let TRUE = \x. \y. x
+let FALSE = \x. \y. y
+let NOT = \b. \x. \y. b y x
+let AND = \a. \b. a b a
+let OR = \a. \b. a a b
+
+// Church numerals
+let ZERO = \f. \x. x
+let ONE = \f. \x. f x
+let TWO = \f. \x. f (f x)
+let THREE = \f. \x. f (f (f x))
+let FIVE = \f. \x. f (f (f (f (f x))))
+let SIX = \f. \x. f (f (f (f (f (f x)))))
+let EIGHT = \f. \x. f (f (f (f (f (f (f (f x)))))))
+let SUCC = \n. \f. \x. f (n f x)
+let PLUS = \m. \n. \f. \x. m f (n f x)
+let MULT = \m. \n. \f. m (n f)
+
+// Pairs
+let PAIR = \a. \b. \f. f a b
+let FST = \p. p (\a. \b. a)
+let SND = \p. p (\a. \b. b)
+
+// Identity (alpha equivalence)
+\x. x === \y. y
+I === \y. y
+
+// Integers
+42 === 42
+
+// Primitive plus
++ 1 2 === 3
+
+// Church numeral applied to (+1) and 0
+TWO (+ 1) 0 === 2
+
+// SKI combinators
+S K K === I
+S K S === I
+
+// Composition
+B I I === I
+
+// Flip
+C (C K) === K
+
+// Church booleans
+NOT TRUE === FALSE
+NOT FALSE === TRUE
+
+// And/Or
+AND TRUE FALSE === FALSE
+AND TRUE TRUE === TRUE
+OR FALSE TRUE === TRUE
+OR FALSE FALSE === FALSE
+
+// Pairs
+FST (PAIR I K) === I
+SND (PAIR I K) === K
+
+// Y combinator fragment: (\x. x x) K = K K
+(\x. x x) K === K K
+
+// B combinator via SKI
+S (K S) K === B
+
+// C combinator (flip): C (C K) = K
+C (C K) === K
+
+// Alpha equivalence for nested stuck applications
+\f. \g. f (g f) (\x. g x) === \a. \b. a (b a) (\y. b y)
+
+// Church arithmetic
+PLUS TWO THREE === FIVE
+MULT TWO THREE === SIX
+
+// Church exponentiation: 2^3 = 8 (exp m n = n m)
+THREE TWO === EIGHT

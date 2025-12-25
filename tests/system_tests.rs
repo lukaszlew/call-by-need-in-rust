@@ -186,5 +186,6 @@ fn closure_captures_multiple(
 #[test]
 fn nbe_equality_tests() {
     let content = include_str!("nbe.txt");
-    call_by_need_in_rust::run_equality_tests(content).unwrap();
+    let stats = call_by_need_in_rust::run_equality_tests(content).unwrap();
+    eprintln!("nbe.txt: {stats:?}");
 }
