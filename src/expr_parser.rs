@@ -16,23 +16,11 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         let var = ident.map(|s| Expr::Var(Var::new(s)));
 
-        let captures = ident
-            .map(Var::new)
-            .separated_by(just(','))
-            .allow_trailing()
-            .delimited_by(just('['), just(']'))
-            .padded();
-
         let lambda = just('\\')
-            .ignore_then(captures)
-            .then(ident.map(Var::new))
+            .ignore_then(ident.map(Var::new))
             .then_ignore(just('.'))
             .then(expr.clone())
-            .map(|((caps, param), body)| Expr::Lam {
-                captures: caps,
-                param,
-                body: Box::new(body),
-            })
+            .map(|(param, body)| Expr::lam(param, body))
             .padded();
 
         let parens = expr.delimited_by(just('('), just(')')).padded();
@@ -70,26 +58,7 @@ mod tests {
 
     #[test]
     fn parse_identity() {
-        assert_eq!(
-            parse(r"\[] x. x"),
-            Expr::Lam {
-                captures: vec![],
-                param: "x".into(),
-                body: Box::new(Expr::Var("x".into())),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_const() {
-        assert_eq!(
-            parse(r"\[y] x. y"),
-            Expr::Lam {
-                captures: vec!["y".into()],
-                param: "x".into(),
-                body: Box::new(Expr::Var("y".into())),
-            }
-        );
+        assert_eq!(parse(r"\x. x"), Expr::lam("x".into(), Expr::Var("x".into())));
     }
 
     #[test]
@@ -116,20 +85,16 @@ mod tests {
 
     #[test]
     fn parse_nested_lambda() {
+        // \f. \x. f x
         assert_eq!(
-            parse(r"\[] f. \[f] x. f x"),
-            Expr::Lam {
-                captures: vec![],
-                param: "f".into(),
-                body: Box::new(Expr::Lam {
-                    captures: vec!["f".into()],
-                    param: "x".into(),
-                    body: Box::new(Expr::App {
-                        head: Box::new(Expr::Var("f".into())),
-                        spine: vec![Expr::Var("x".into())],
-                    }),
-                }),
-            }
+            parse(r"\f. \x. f x"),
+            Expr::lam(
+                "f".into(),
+                Expr::lam(
+                    "x".into(),
+                    Expr::app(Expr::Var("f".into()), vec![Expr::Var("x".into())])
+                )
+            )
         );
     }
 
@@ -143,18 +108,6 @@ mod tests {
                     head: Box::new(Expr::Var("g".into())),
                     spine: vec![Expr::Var("x".into())],
                 }],
-            }
-        );
-    }
-
-    #[test]
-    fn parse_multiple_captures() {
-        assert_eq!(
-            parse(r"\[a, b, c] x. x"),
-            Expr::Lam {
-                captures: vec!["a".into(), "b".into(), "c".into()],
-                param: "x".into(),
-                body: Box::new(Expr::Var("x".into())),
             }
         );
     }

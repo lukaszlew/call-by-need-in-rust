@@ -259,13 +259,13 @@ impl Runtime {
             }
             // Capture current bindings into closure's env - this is where
             // lexical scoping happens. The closure remembers its definition site.
-            Expr::Lam {
-                captures,
-                param,
-                body,
-            } => {
-                let closure_env: HashMap<Var, HeapPtr> =
-                    captures.iter().map(|v| (v.clone(), env[v])).collect();
+            Expr::Lam { param, body } => {
+                let closure_env: HashMap<Var, HeapPtr> = body
+                    .free_vars()
+                    .into_iter()
+                    .filter(|v| v != param)
+                    .map(|v| (v.clone(), env[&v]))
+                    .collect();
                 self.alloc(HeapObj::ExprClosure(ExprClosure {
                     param: param.clone(),
                     body: (**body).clone(),
@@ -299,11 +299,7 @@ impl Runtime {
                     spine: vec![],
                 });
                 let body = self.apply(obj, free_var);
-                Expr::Lam {
-                    captures: vec![],
-                    param,
-                    body: Box::new(self.readback(body, depth + 1)),
-                }
+                Expr::lam(param, self.readback(body, depth + 1))
             }
             HeapObj::ReadbackFreeVar { var, spine } => Expr::app(
                 Expr::Var(var),
@@ -539,7 +535,7 @@ mod test {
     #[rstest]
     fn foas_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        assert_eq!(rt.get_i32(rt.run(r"(\[] x. x) 5")), 5);
+        assert_eq!(rt.get_i32(rt.run(r"(\x. x) 5")), 5);
     }
 
     #[rstest]
@@ -555,7 +551,7 @@ mod test {
     ) {
         let rt = Runtime::new(mode);
         let env = HashMap::from([(Var::new("x"), rt.i32(100))]);
-        let closure = rt.expr(&env, &parse(r"\[x] y. x"));
+        let closure = rt.expr(&env, &parse(r"\y. x"));
         let result = rt.app(closure, rt.i32(999));
         assert_eq!(rt.get_i32(result), 100);
     }
@@ -569,23 +565,23 @@ mod test {
     #[rstest]
     fn foas_fst_snd(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[x] y. x) 5 6")), 5);
-        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[] y. y) 5 6")), 6);
+        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. x) 5 6")), 5);
+        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. y) 5 6")), 6);
     }
 
     #[rstest]
     fn foas_laziness(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // const 42 (+ 1 2) - second arg never evaluated
-        assert_eq!(rt.get_i32(rt.run(r"(\[] x. \[x] y. x) 42 (+ 1 2)")), 42);
+        assert_eq!(rt.get_i32(rt.run(r"(\x. \y. x) 42 (+ 1 2)")), 42);
     }
 
     #[rstest]
     fn foas_ski(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // S K K 42 = 42
-        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
-        let k = r"\[] x. \[x] y. x";
+        let s = r"\x. \y. \z. x z (y z)";
+        let k = r"\x. \y. x";
         assert_eq!(rt.get_i32(rt.run(&format!("({s}) ({k}) ({k}) 42"))), 42);
     }
 
@@ -597,7 +593,7 @@ mod test {
     fn nbe_identity(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // Different variable names, same identity function
-        assert_eq!(rt.normalize(r"\[] x. x"), rt.normalize(r"\[] y. y"));
+        assert_eq!(rt.normalize(r"\x. x"), rt.normalize(r"\y. y"));
     }
 
     #[rstest]
@@ -616,7 +612,7 @@ mod test {
     fn nbe_church_2(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // Church 2 applied to (+1) and 0 gives 2
-        let church_2 = r"\[] f. \[f] x. f (f x)";
+        let church_2 = r"\f. \x. f (f x)";
         assert_eq!(
             rt.normalize(&format!("({church_2}) (+ 1) 0")),
             crate::Expr::Int(2)
@@ -627,9 +623,9 @@ mod test {
     fn nbe_skk_is_i(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // S K K = I (both normalize to \x. x)
-        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
-        let k = r"\[] x. \[x] y. x";
-        let i = r"\[] x. x";
+        let s = r"\x. \y. \z. x z (y z)";
+        let k = r"\x. \y. x";
+        let i = r"\x. x";
         assert_eq!(rt.normalize(&format!("({s}) ({k}) ({k})")), rt.normalize(i));
     }
 
@@ -637,29 +633,27 @@ mod test {
     fn nbe_stuck_app(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // \f. f (\x. x) normalizes to \x0. x0 (\x1. x1)
-        let result = rt.normalize(r"\[] f. f (\[] x. x)");
-        let expected = crate::Expr::Lam {
-            captures: vec![],
-            param: Var::new("x0"),
-            body: Box::new(crate::Expr::App {
+        let result = rt.normalize(r"\f. f (\x. x)");
+        let expected = crate::Expr::lam(
+            Var::new("x0"),
+            crate::Expr::App {
                 head: Box::new(crate::Expr::Var(Var::new("x0"))),
-                spine: vec![crate::Expr::Lam {
-                    captures: vec![],
-                    param: Var::new("x1"),
-                    body: Box::new(crate::Expr::Var(Var::new("x1"))),
-                }],
-            }),
-        };
+                spine: vec![crate::Expr::lam(
+                    Var::new("x1"),
+                    crate::Expr::Var(Var::new("x1")),
+                )],
+            },
+        );
         assert_eq!(result, expected);
     }
 
     // Church numeral definitions for tests
-    const ZERO: &str = r"\[] f. \[] x. x";
-    const SUCC: &str = r"\[] n. \[n] f. \[n, f] x. f (n f x)";
-    const PLUS: &str = r"\[] m. \[m] n. \[m, n] f. \[m, n, f] x. m f (n f x)";
-    const MULT: &str = r"\[] m. \[m] n. \[m, n] f. m (n f)";
-    const TRUE: &str = r"\[] x. \[x] y. x";
-    const FALSE: &str = r"\[] x. \[] y. y";
+    const ZERO: &str = r"\f. \x. x";
+    const SUCC: &str = r"\n. \f. \x. f (n f x)";
+    const PLUS: &str = r"\m. \n. \f. \x. m f (n f x)";
+    const MULT: &str = r"\m. \n. \f. m (n f)";
+    const TRUE: &str = r"\x. \y. x";
+    const FALSE: &str = r"\x. \y. y";
 
     fn church(n: usize) -> String {
         let mut s = ZERO.to_string();
@@ -700,8 +694,8 @@ mod test {
         let rt = Runtime::new(mode);
         // compose f g x = f (g x)
         // compose id id = id
-        let compose = r"\[] f. \[f] g. \[f, g] x. f (g x)";
-        let id = r"\[] x. x";
+        let compose = r"\f. \g. \x. f (g x)";
+        let id = r"\x. x";
         assert_eq!(
             rt.normalize(&format!("({compose}) ({id}) ({id})")),
             rt.normalize(id)
@@ -713,9 +707,9 @@ mod test {
         let rt = Runtime::new(mode);
         // flip f x y = f y x
         // flip (flip f) = f
-        let flip = r"\[] f. \[f] x. \[f, x] y. f y x";
+        let flip = r"\f. \x. \y. f y x";
         // flip (flip K) should equal K
-        let k = r"\[] x. \[x] y. x";
+        let k = r"\x. \y. x";
         assert_eq!(
             rt.normalize(&format!("({flip}) (({flip}) ({k}))")),
             rt.normalize(k)
@@ -726,7 +720,7 @@ mod test {
     fn nbe_church_booleans(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
         // not true = false, not false = true
-        let not = r"\[] b. \[b] x. \[b, x] y. b y x";
+        let not = r"\b. \x. \y. b y x";
         assert_eq!(
             rt.normalize(&format!("({not}) ({TRUE})")),
             rt.normalize(FALSE)
@@ -740,8 +734,8 @@ mod test {
     #[rstest]
     fn nbe_and_or(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let and = r"\[] a. \[a] b. a b a";
-        let or = r"\[] a. \[a] b. a a b";
+        let and = r"\a. \b. a b a";
+        let or = r"\a. \b. a a b";
 
         // true && false = false
         assert_eq!(
@@ -768,11 +762,11 @@ mod test {
     #[rstest]
     fn nbe_pair(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
         let rt = Runtime::new(mode);
-        let pair = r"\[] a. \[a] b. \[a, b] f. f a b";
-        let fst = r"\[] p. p (\[] a. \[a] b. a)";
-        let snd = r"\[] p. p (\[] a. \[] b. b)";
-        let id = r"\[] x. x";
-        let k = r"\[] x. \[x] y. x";
+        let pair = r"\a. \b. \f. f a b";
+        let fst = r"\p. p (\a. \b. a)";
+        let snd = r"\p. p (\a. \b. b)";
+        let id = r"\x. x";
+        let k = r"\x. \y. x";
 
         // fst (pair id k) = id
         assert_eq!(
@@ -791,8 +785,8 @@ mod test {
         let rt = Runtime::new(mode);
         // Not full Y combinator (would diverge), but test its building blocks
         // (\x. x x) applied to K gives K K which normalizes
-        let omega_half = r"\[] x. x x";
-        let k = r"\[] x. \[x] y. x";
+        let omega_half = r"\x. x x";
+        let k = r"\x. \y. x";
         // (\x. x x) K = K K = \y. K
         assert_eq!(
             rt.normalize(&format!("({omega_half}) ({k})")),
@@ -806,10 +800,10 @@ mod test {
     ) {
         let rt = Runtime::new(mode);
         // S K = \y.\z. K z (y z) = \y.\z. z
-        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
-        let k = r"\[] x. \[x] y. x";
+        let s = r"\x. \y. \z. x z (y z)";
+        let k = r"\x. \y. x";
         // S K anything = I
-        let i = r"\[] x. x";
+        let i = r"\x. x";
         assert_eq!(rt.normalize(&format!("({s}) ({k}) ({k})")), rt.normalize(i));
         // Also S K S = I
         assert_eq!(rt.normalize(&format!("({s}) ({k}) ({s})")), rt.normalize(i));
@@ -820,10 +814,10 @@ mod test {
         let rt = Runtime::new(mode);
         // B = S (K S) K (composition)
         // B f g x = f (g x)
-        let s = r"\[] x. \[x] y. \[x, y] z. x z (y z)";
-        let k = r"\[] x. \[x] y. x";
+        let s = r"\x. \y. \z. x z (y z)";
+        let k = r"\x. \y. x";
         let b_via_sk = format!("({s}) (({k}) ({s})) ({k})");
-        let b_direct = r"\[] f. \[f] g. \[f, g] x. f (g x)";
+        let b_direct = r"\f. \g. \x. f (g x)";
         assert_eq!(rt.normalize(&b_via_sk), rt.normalize(b_direct));
     }
 
@@ -832,8 +826,8 @@ mod test {
         let rt = Runtime::new(mode);
         // C = flip = \f.\x.\y. f y x
         // C (C f) = f
-        let c = r"\[] f. \[f] x. \[f, x] y. f y x";
-        let f = r"\[] a. \[a] b. a"; // K
+        let c = r"\f. \x. \y. f y x";
+        let f = r"\a. \b. a"; // K
         assert_eq!(
             rt.normalize(&format!("({c}) (({c}) ({f}))")),
             rt.normalize(f)
@@ -860,8 +854,8 @@ mod test {
         let rt = Runtime::new(mode);
         // \f.\g. f (g f) (\x. g x)
         // Tests deeply nested stuck applications
-        let expr1 = r"\[] f. \[f] g. f (g f) (\[g] x. g x)";
-        let expr2 = r"\[] a. \[a] b. a (b a) (\[b] y. b y)";
+        let expr1 = r"\f. \g. f (g f) (\x. g x)";
+        let expr2 = r"\a. \b. a (b a) (\y. b y)";
         assert_eq!(rt.normalize(expr1), rt.normalize(expr2));
     }
 }
