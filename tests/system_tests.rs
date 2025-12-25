@@ -182,3 +182,9 @@ fn closure_captures_multiple(
     assert_eq!(rt.get_i32(result), 60);
     assert_eq!(rt.get_i32(counter), 3);
 }
+
+#[test]
+fn nbe_equality_tests() {
+    let content = include_str!("nbe.txt");
+    call_by_need_in_rust::run_equality_tests(content).unwrap();
+}
