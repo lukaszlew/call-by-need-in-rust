@@ -160,7 +160,7 @@ impl Runtime {
     // This is closer to STG's eval/apply loop.
     fn force_iter(&self, mut ptr: HeapPtr) -> HeapObj {
         enum UseValueTo {
-            ApplyAsArg(HeapPtr),
+            ApplyArg(HeapPtr),
             UpdateThunk(HeapPtr),
         }
         let mut stack: Vec<UseValueTo> = vec![];
@@ -170,7 +170,7 @@ impl Runtime {
             match obj {
                 HeapObj::App(f, arg) => {
                     stack.push(UseValueTo::UpdateThunk(ptr));
-                    stack.push(UseValueTo::ApplyAsArg(arg));
+                    stack.push(UseValueTo::ApplyArg(arg));
                     ptr = f
                 }
                 value => match stack.pop() {
@@ -179,7 +179,7 @@ impl Runtime {
                         self.update(thunk, value.clone());
                         ptr = thunk
                     }
-                    Some(UseValueTo::ApplyAsArg(arg)) => ptr = self.apply(value, arg),
+                    Some(UseValueTo::ApplyArg(arg)) => ptr = self.apply(value, arg),
                 },
             }
         }
