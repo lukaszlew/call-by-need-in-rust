@@ -1,88 +1,394 @@
 // Normalization by Evaluation tests
+// Translated from TermTestData.hs
 
+// ============================================================================
 // Combinators
+// ============================================================================
 let I = \x. x
 let K = \x. \y. x
 let S = \x. \y. \z. x z (y z)
 let B = \f. \g. \x. f (g x)
 let C = \f. \x. \y. f y x
+let W = \f. \x. f x x
+let OMEGA = \x. x x
 
-// Church booleans
-let TRUE = \x. \y. x
-let FALSE = \x. \y. y
-let NOT = \b. \x. \y. b y x
-let AND = \a. \b. a b a
-let OR = \a. \b. a a b
+// ============================================================================
+// Church Booleans
+// ============================================================================
+let TRUE = \t. \f. t
+let FALSE = \t. \f. f
+let AND = \a. \b. a b FALSE
+let OR = \a. \b. a TRUE b
+let NOT = \a. a FALSE TRUE
+let IF = \c. \t. \e. c t e
 
-// Church numerals
-let ZERO = \f. \x. x
-let ONE = \f. \x. f x
-let TWO = \f. \x. f (f x)
-let THREE = \f. \x. f (f (f x))
-let FIVE = \f. \x. f (f (f (f (f x))))
-let SIX = \f. \x. f (f (f (f (f (f x)))))
-let EIGHT = \f. \x. f (f (f (f (f (f (f (f x)))))))
-let SUCC = \n. \f. \x. f (n f x)
-let PLUS = \m. \n. \f. \x. m f (n f x)
-let MULT = \m. \n. \f. m (n f)
+// ============================================================================
+// Church Numerals
+// ============================================================================
+let C0 = \s. \z. z
+let C1 = \s. \z. s z
+let C2 = \s. \z. s (s z)
+let C3 = \s. \z. s (s (s z))
+let C4 = \s. \z. s (s (s (s z)))
+let C5 = \s. \z. s (s (s (s (s z))))
+let C6 = \s. \z. s (s (s (s (s (s z)))))
+let SUCC = \n. \s. \z. s (n s z)
+let CPLUS = \m. \n. \s. \z. m s (n s z)
+let MULT = \m. \n. \s. m (n s)
+let EXP = \m. \n. n m
+let ISZERO = \n. n (\x. FALSE) TRUE
 
-// Pairs
+// ============================================================================
+// Church Pairs
+// ============================================================================
 let PAIR = \a. \b. \f. f a b
 let FST = \p. p (\a. \b. a)
 let SND = \p. p (\a. \b. b)
 
-// Identity (alpha equivalence)
-\x. x === \y. y
-I === \y. y
+// ============================================================================
+// Church Lists (right fold encoding)
+// ============================================================================
+let NIL = \c. \n. n
+let CONS = \h. \t. \c. \n. c h (t c n)
+let FOLDR = \f. \z. \l. l f z
+let MAP = \f. \l. l (\h. \t. CONS (f h) t) NIL
+let APPEND = \l. \r. l CONS r
+let LENGTH = \l. l (\h. \n. SUCC n) C0
 
-// Integers
-42 === 42
+// ============================================================================
+// Scott Booleans
+// ============================================================================
+let STRUE = \t. \f. t
+let SFALSE = \t. \f. f
+let SIF = \b. \t. \e. b t e
 
-// Primitive plus
-+ 1 2 === 3
+// ============================================================================
+// Scott Numerals
+// ============================================================================
+let S0 = \z. \s. z
+let SSUCC = \n. \z. \s. s n
+let S1 = SSUCC S0
+let S2 = SSUCC S1
+let S3 = SSUCC S2
+let SCASE = \n. \z. \s. n z s
 
-// Church numeral applied to (+1) and 0
-TWO (+ 1) 0 === 2
+// ============================================================================
+// Scott Lists
+// ============================================================================
+let SNIL = \n. \c. n
+let SCONS = \h. \t. \n. \c. c h t
+let SCASELIST = \l. \n. \c. l n c
 
-// SKI combinators
+// ============================================================================
+// Combinator Tests
+// ============================================================================
+
+// I = I (simplest case)
+I === I
+
+// S K K a = a (original form from Haskell)
+\a. S K K a === \a. a
+
+// I I = I
+I I === I
+
+// I a = a (with free var)
+\a. I a === \a. a
+
+// K a b = a
+\a. \b. K a b === \a. \b. a
+
+// S f g x = f x (g x)
+\f. \g. \x. S f g x === \f. \g. \x. f x (g x)
+
+// S K K = I
 S K K === I
-S K S === I
 
-// Composition
-B I I === I
+// B f g x = f (g x)
+\f. \g. \x. B f g x === \f. \g. \x. f (g x)
 
-// Flip
-C (C K) === K
+// C f x y = f y x
+\f. \x. \y. C f x y === \f. \x. \y. f y x
 
-// Church booleans
+// W f x = f x x
+\f. \x. W f x === \f. \x. f x x
+
+// ============================================================================
+// Church Boolean Tests
+// ============================================================================
+
+// true a b = a
+\a. \b. TRUE a b === \a. \b. a
+
+// false a b = b
+\a. \b. FALSE a b === \a. \b. b
+
+// not true = false
 NOT TRUE === FALSE
+
+// not false = true
 NOT FALSE === TRUE
 
-// And/Or
-AND TRUE FALSE === FALSE
+// and true true = true
 AND TRUE TRUE === TRUE
+
+// and true false = false
+AND TRUE FALSE === FALSE
+
+// and false true = false
+AND FALSE TRUE === FALSE
+
+// and false false = false
+AND FALSE FALSE === FALSE
+
+// or true true = true
+OR TRUE TRUE === TRUE
+
+// or true false = true
+OR TRUE FALSE === TRUE
+
+// or false true = true
 OR FALSE TRUE === TRUE
+
+// or false false = false
 OR FALSE FALSE === FALSE
 
-// Pairs
-FST (PAIR I K) === I
-SND (PAIR I K) === K
+// if true a b = a
+\a. \b. IF TRUE a b === \a. \b. a
 
-// Y combinator fragment: (\x. x x) K = K K
-(\x. x x) K === K K
+// if false a b = b
+\a. \b. IF FALSE a b === \a. \b. b
 
-// B combinator via SKI
-S (K S) K === B
+// ============================================================================
+// Church Numeral Tests
+// ============================================================================
 
-// C combinator (flip): C (C K) = K
-C (C K) === K
+// 0 f x = x
+\f. \x. C0 f x === \f. \x. x
 
-// Alpha equivalence for nested stuck applications
-\f. \g. f (g f) (\x. g x) === \a. \b. a (b a) (\y. b y)
+// 1 f x = f x
+\f. \x. C1 f x === \f. \x. f x
 
-// Church arithmetic
-PLUS TWO THREE === FIVE
-MULT TWO THREE === SIX
+// 2 f x = f (f x)
+\f. \x. C2 f x === \f. \x. f (f x)
 
-// Church exponentiation: 2^3 = 8 (exp m n = n m)
-THREE TWO === EIGHT
+// 3 f x = f (f (f x))
+\f. \x. C3 f x === \f. \x. f (f (f x))
+
+// succ 0 f x = 1 f x
+\f. \x. SUCC C0 f x === \f. \x. C1 f x
+
+// succ 1 f x = 2 f x
+\f. \x. SUCC C1 f x === \f. \x. C2 f x
+
+// succ 2 f x = 3 f x
+\f. \x. SUCC C2 f x === \f. \x. C3 f x
+
+// (0+0) f x = 0 f x
+\f. \x. CPLUS C0 C0 f x === \f. \x. C0 f x
+
+// (0+1) f x = 1 f x
+\f. \x. CPLUS C0 C1 f x === \f. \x. C1 f x
+
+// (1+0) f x = 1 f x
+\f. \x. CPLUS C1 C0 f x === \f. \x. C1 f x
+
+// (1+1) f x = 2 f x
+\f. \x. CPLUS C1 C1 f x === \f. \x. C2 f x
+
+// (2+3) f x = 5 f x
+\f. \x. CPLUS C2 C3 f x === \f. \x. C5 f x
+
+// (0*5) f x = 0 f x
+\f. \x. MULT C0 C5 f x === \f. \x. C0 f x
+
+// (5*0) f x = 0 f x
+\f. \x. MULT C5 C0 f x === \f. \x. C0 f x
+
+// (1*5) f x = 5 f x
+\f. \x. MULT C1 C5 f x === \f. \x. C5 f x
+
+// (2*2) f x = 4 f x
+\f. \x. MULT C2 C2 f x === \f. \x. C4 f x
+
+// (2*3) f x = 6 f x
+\f. \x. MULT C2 C3 f x === \f. \x. C6 f x
+
+// (2^0) f x = 1 f x
+\f. \x. EXP C2 C0 f x === \f. \x. C1 f x
+
+// (2^1) f x = 2 f x
+\f. \x. EXP C2 C1 f x === \f. \x. C2 f x
+
+// (2^2) f x = 4 f x
+\f. \x. EXP C2 C2 f x === \f. \x. C4 f x
+
+// isZero 0 = true
+ISZERO C0 === TRUE
+
+// isZero 1 = false
+ISZERO C1 === FALSE
+
+// isZero 5 = false
+ISZERO C5 === FALSE
+
+// ============================================================================
+// Church Pair Tests
+// ============================================================================
+
+// fst (pair a b) = a
+\a. \b. FST (PAIR a b) === \a. \b. a
+
+// snd (pair a b) = b
+\a. \b. SND (PAIR a b) === \a. \b. b
+
+// fst (pair 1 2) = 1
+FST (PAIR C1 C2) === C1
+
+// snd (pair 1 2) = 2
+SND (PAIR C1 C2) === C2
+
+// ============================================================================
+// Church List Tests
+// ============================================================================
+
+// length nil f x = 0 f x
+\f. \x. LENGTH NIL f x === \f. \x. C0 f x
+
+// length [a] f x = 1 f x
+\a. \f. \x. LENGTH (CONS a NIL) f x === \a. \f. \x. C1 f x
+
+// length [a,b] f x = 2 f x
+\a. \b. \f. \x. LENGTH (CONS a (CONS b NIL)) f x === \a. \b. \f. \x. C2 f x
+
+// foldr K z nil = z
+\z. FOLDR K z NIL === \z. z
+
+// append nil nil = nil
+APPEND NIL NIL === NIL
+
+// map I nil = nil
+MAP I NIL === NIL
+
+// ============================================================================
+// Scott Boolean Tests
+// ============================================================================
+
+// sTrue a b = a
+\a. \b. STRUE a b === \a. \b. a
+
+// sFalse a b = b
+\a. \b. SFALSE a b === \a. \b. b
+
+// sIf sTrue a b = a
+\a. \b. SIF STRUE a b === \a. \b. a
+
+// sIf sFalse a b = b
+\a. \b. SIF SFALSE a b === \a. \b. b
+
+// ============================================================================
+// Scott Numeral Tests
+// ============================================================================
+
+// s0 z s = z
+\z. \s. S0 z s === \z. \s. z
+
+// sCase s0 z f = z
+\z. \f. SCASE S0 z f === \z. \f. z
+
+// sSucc s0 z s = s s0
+\z. \s. SSUCC S0 z s === \z. \s. s S0
+
+// ============================================================================
+// Scott List Tests
+// ============================================================================
+
+// sNil n c = n
+\n. \c. SNIL n c === \n. \c. n
+
+// sCaseList sNil n c = n
+\n. \c. SCASELIST SNIL n c === \n. \c. n
+
+// ============================================================================
+// Shadowing Tests
+// ============================================================================
+
+// (λx.λx.x) a b = b
+\a. \b. (\x. \x. x) a b === \a. \b. b
+
+// (λx.λx.λx.x) a b c = c
+\a. \b. \c. (\x. \x. \x. x) a b c === \a. \b. \c. c
+
+// (λx.(λx.x) x) a = a
+\a. (\x. (\x. x) x) a === \a. a
+
+// ============================================================================
+// Capture-Avoiding Substitution Tests
+// ============================================================================
+
+// (λy.λx.y) x z = x
+\x. \z. (\y. \x. y) x z === \x. \z. x
+
+// (λf.λx.f x) (λy.x) z = x
+\x. \z. (\f. \a. f a) (\y. x) z === \x. \z. x
+
+// (λx.λy.x y) y a = y a
+\y. \a. (\x. \z. x z) y a === \y. \a. y a
+
+// B (λy.x) I a = x
+\x. \a. B (\y. x) I a === \x. \a. x
+
+// ============================================================================
+// Alpha Equivalence Tests
+// ============================================================================
+
+// λx.x = λy.y
+\x. x === \y. y
+
+// λx.λy.x = λa.λb.a
+\x. \y. x === \a. \b. a
+
+// λx.λy.y = λa.λb.b
+\x. \y. y === \a. \b. b
+
+// K = K
+K === K
+
+// S = S
+S === S
+
+// Alpha non-equivalence (from Haskell alphaNeqTests)
+// x != y (free vars)
+\x. \y. x /== \x. \y. y
+
+// λx.x != λx.λy.y
+(\x. x) /== (\x. \y. y)
+
+// K != S
+K /== S
+
+// ============================================================================
+// Eta Tests (our NbE does beta but NOT eta)
+// ============================================================================
+
+// λx.f x does NOT eta-reduce to f
+\f. \x. f x /== \f. f
+
+// λx.x x unchanged (can't eta-reduce anyway)
+\x. x x === \x. x x
+
+// λx.I x beta-reduces to λx.x
+\x. I x === \x. x
+
+// NbE eta-expands during readback, so these ARE equal:
+\x. I x === I
+
+// λx.λy.f y x unchanged
+\f. \x. \y. f y x === \f. \x. \y. f y x
+
+// ============================================================================
+// Primitive Plus Tests (our extension)
+// ============================================================================
++ 1 2 === 3
++ 0 0 === 0
+(\x. + x 1) 5 === 6

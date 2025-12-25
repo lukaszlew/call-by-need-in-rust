@@ -650,17 +650,23 @@ pub fn run_equality_tests(content: &str) -> Result<TestStats, String> {
             continue;
         }
 
-        // equality test
-        let Some((left, right)) = line.split_once("===") else {
-            return Err(format!("line {}: expected `===` or `let`: {line}", line_num + 1));
+        // equality test (===) or inequality test (/==)
+        let (left, right, expect_equal) = if let Some((l, r)) = line.split_once("===") {
+            (l, r, true)
+        } else if let Some((l, r)) = line.split_once("/==") {
+            (l, r, false)
+        } else {
+            return Err(format!("line {}: expected `===`, `/==`, or `let`: {line}", line_num + 1));
         };
         let left_ptr = rt.expr(&env, &expr_parser::parse(left.trim()));
         let right_ptr = rt.expr(&env, &expr_parser::parse(right.trim()));
         let left_norm = rt.readback(left_ptr, 0);
         let right_norm = rt.readback(right_ptr, 0);
-        if left_norm != right_norm {
+        let are_equal = left_norm == right_norm;
+        if are_equal != expect_equal {
+            let msg = if expect_equal { "expected equal, got different" } else { "expected different, got equal" };
             return Err(format!(
-                "line {}: not equal\n  left:  {}\n  right: {}\n  left  normalized: {left_norm:?}\n  right normalized: {right_norm:?}",
+                "line {}: {msg}\n  left:  {}\n  right: {}\n  left  normalized: {left_norm:?}\n  right normalized: {right_norm:?}",
                 line_num + 1, left.trim(), right.trim()
             ));
         }
