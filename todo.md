@@ -1,3 +1,7 @@
+Goal:
+- compare to sharing graph, esp copying.
+- perhaps implement sharing graph.
+
 What could we do next?
 - eval experiments
   - call by push value
