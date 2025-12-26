@@ -12,7 +12,7 @@ mod system_tests;
 use std::collections::HashMap;
 
 pub use expr::Expr;
-pub use heap::{Heap, HeapPtr};
+pub use heap::{Heap, HeapPtr, HeapStats};
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct Var(pub String);
@@ -120,6 +120,12 @@ impl Runtime {
     #[must_use]
     pub fn heap_size(&self) -> usize {
         self.heap.len()
+    }
+
+    /// Heap operation statistics.
+    #[must_use]
+    pub fn stats(&self) -> HeapStats {
+        self.heap.stats()
     }
 
     /// Force and extract i32.

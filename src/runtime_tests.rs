@@ -1,7 +1,7 @@
 //! Didactic tests: These tests demonstrate key concepts of call-by-need.
 
 use crate::common::{counted_const, counted_inc};
-use crate::{expr_parser::parse, EnvExt, Expr, ForceMode, HeapPtr, Runtime, Var};
+use crate::{expr_parser::parse, EnvExt, Expr, ForceMode, HeapPtr, HeapStats, Runtime, Var};
 use rstest::rstest;
 use std::collections::HashMap;
 
@@ -13,6 +13,11 @@ fn identity_applied(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: 
     let rt = Runtime::new(mode);
     let t = rt.app(rt.lam("x", &[], |env, _rt| env.v("x")), rt.i32(5));
     assert_eq!(rt.get_i32(t), 5);
+    let expected_reads = match mode {
+        ForceMode::Recursive => 3,
+        ForceMode::Iterative => 4,
+    };
+    assert_eq!(rt.stats(), HeapStats { allocs: 3, reads: expected_reads, writes: 1 });
 }
 
 // -------------------------------------------------------------------------
@@ -105,6 +110,11 @@ fn shared_thunk_evaluated_once(
     assert_eq!(rt.get_i32(counter), 0);
     assert_eq!(rt.get_i32(result), 2);
     assert_eq!(rt.get_i32(counter), 1); // Called once, not twice!
+    let expected_reads = match mode {
+        ForceMode::Recursive => 14,
+        ForceMode::Iterative => 17,
+    };
+    assert_eq!(rt.stats(), HeapStats { allocs: 11, reads: expected_reads, writes: 4 });
 }
 
 // -------------------------------------------------------------------------

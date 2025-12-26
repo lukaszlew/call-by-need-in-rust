@@ -1,6 +1,6 @@
 //! Shared test utilities for call-by-need tests.
 
-use crate::{expr_parser, EnvExt, ForceMode, HeapPtr, Runtime, Var};
+use crate::{expr_parser, EnvExt, ForceMode, HeapPtr, HeapStats, Runtime, Var};
 use std::collections::HashMap;
 
 /// Create an increment function that increments counter when called.
@@ -25,11 +25,12 @@ pub fn add(rt: &Runtime) -> HeapPtr {
 }
 
 /// Statistics from running equality tests.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct TestStats {
     pub bindings: usize,
     pub tests: usize,
     pub heap_size: usize,
+    pub heap_stats: HeapStats,
 }
 
 /// Run equality tests from a string.
@@ -82,5 +83,6 @@ pub fn run_equality_tests(content: &str, mode: ForceMode) -> Result<TestStats, S
         stats.tests += 1;
     }
     stats.heap_size = rt.heap_size();
+    stats.heap_stats = rt.stats();
     Ok(stats)
 }
