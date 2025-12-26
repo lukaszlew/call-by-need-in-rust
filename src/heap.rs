@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 
 /// Pointer into the heap.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct HeapPtr(usize);
 
 /// Generic heap that stores objects of type T.

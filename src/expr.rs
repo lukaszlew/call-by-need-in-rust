@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-pub use super::{Var, HeapPtr, Closure, ClosureBody, HeapObj, Runtime};
+pub use super::{Env, ExprClosure, HeapObj, HeapPtr, Runtime, Var};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -97,24 +97,31 @@ impl Expr {
         }
     }
 
-    /// Allocate Expr to heap. All Vars become Param holes.
-    pub fn to_heap(&self, rt: &Runtime) -> HeapPtr {
+    /// Allocate Expr to heap with free variable bindings.
+    /// Bound vars get Param placeholders; free vars are resolved from env.
+    pub fn to_heap(&self, rt: &Runtime, env: &Env) -> HeapPtr {
         match self {
-            Expr::Var(v) => rt.alloc(HeapObj::Param(v.clone())),
+            Expr::Var(v) => env
+                .get(v)
+                .copied()
+                .unwrap_or_else(|| panic!("unbound variable: {:?}", v)),
             Expr::Int(n) => rt.i32(*n),
             Expr::App { head, spine } => {
-                let mut ptr = head.to_heap(rt);
+                let mut ptr = head.to_heap(rt, env);
                 for arg in spine {
-                    ptr = rt.app(ptr, arg.to_heap(rt));
+                    ptr = rt.app(ptr, arg.to_heap(rt, env));
                 }
                 ptr
             }
             Expr::Lam { param, body } => {
-                let body_ptr = body.to_heap(rt);
-                rt.alloc(HeapObj::Closure(Closure {
-                    param: param.clone(),
+                let param_ptr = rt.alloc(HeapObj::Param);
+                let mut env = env.clone();
+                env.insert(param.clone(), param_ptr);
+                let body_ptr = body.to_heap(rt, &env);
+                rt.alloc(HeapObj::ExprClosure(ExprClosure {
+                    param: param_ptr,
                     env: HashMap::new(),
-                    body: ClosureBody::Code(body_ptr),
+                    body: body_ptr,
                 }))
             }
             Expr::Plus => rt.plus(),

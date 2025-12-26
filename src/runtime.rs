@@ -43,33 +43,21 @@ impl EnvExt for Env {
     }
 }
 
-/// The body of a closure - either Rust code or pre-allocated HeapPtr code.
+/// Closure with Rust function body. Uses Var-based env for ergonomic API.
 #[derive(Clone)]
-pub enum ClosureBody {
-    Rust(fn(&Env, &Runtime) -> HeapPtr),
-    /// Pre-allocated body with Param holes for variables.
-    Code(HeapPtr),
-}
-
-/// Runtime representation of a lambda.
-///
-/// # Lexical Scoping
-/// Each closure captures its environment at creation time (the `env` field).
-/// When applied, we extend this captured env with the argument - we don't look up
-/// variables in the caller's environment. This is lexical (static) scoping.
-///
-/// # Why No Capture-Avoiding Substitution Needed
-/// We never substitute terms into terms. Instead:
-/// 1. When a lambda is instantiated, we capture current bindings into `env`
-/// 2. When applied, we extend `env` with param->arg and run the body
-/// 3. Variable lookup goes through `env`, not through textual substitution
-///
-/// This environment-based approach sidesteps capture issues entirely.
-#[derive(Clone)]
-pub struct Closure {
+pub struct RustClosure {
     pub param: Var,
     pub env: Env,
-    pub body: ClosureBody,
+    pub body: fn(&Env, &Runtime) -> HeapPtr,
+}
+
+/// Closure from parsed Expr. Uses HeapPtr-based env for efficient lookup.
+/// `param` points to the Param placeholder in `body`.
+#[derive(Clone)]
+pub struct ExprClosure {
+    pub param: HeapPtr,
+    pub env: HashMap<HeapPtr, HeapPtr>,
+    pub body: HeapPtr,
 }
 
 // HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
@@ -80,9 +68,10 @@ pub struct Closure {
 pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
-    Closure(Closure),
-    /// Variable hole, resolved via env in eval_code.
-    Param(Var),
+    RustClosure(RustClosure),
+    ExprClosure(ExprClosure),
+    /// Parameter placeholder, resolved via HeapPtr lookup in eval_code.
+    Param,
     ReadbackFreeVar {
         /// `{ var: Var("x0"), spine: [a, b] }` represents `x0 a b`
         var: Var,
@@ -156,15 +145,20 @@ impl Runtime {
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure {
-            HeapObj::Closure(c) => {
+            HeapObj::RustClosure(c) => {
                 let mut env = c.env;
                 let None = env.insert(c.param.clone(), arg) else {
                     panic!("param {:?} shadows capture", c.param)
                 };
-                match c.body {
-                    ClosureBody::Rust(code) => code(&env, self),
-                    ClosureBody::Code(body) => self.eval_code(body, &env),
-                }
+                (c.body)(&env, self)
+            }
+            HeapObj::ExprClosure(c) => {
+                let mut env = c.env;
+                assert!(
+                    env.insert(c.param, arg).is_none(),
+                    "param shadows capture"
+                );
+                self.eval_code(c.body, &env)
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
                 spine.push(arg);
@@ -225,7 +219,7 @@ impl Runtime {
         self.heap.alloc(obj)
     }
 
-    /// Create a Closure with Rust code body.
+    /// Create a RustClosure with Rust code body.
     /// `param` is the name for the argument when the closure is applied.
     /// `env` is a list of (name, value) pairs to capture.
     /// Access variables in the closure via `env.v("name")`.
@@ -236,10 +230,10 @@ impl Runtime {
         env: &[(&str, HeapPtr)],
         f: fn(&Env, &Runtime) -> HeapPtr,
     ) -> HeapPtr {
-        self.heap.alloc(HeapObj::Closure(Closure {
+        self.heap.alloc(HeapObj::RustClosure(RustClosure {
             param: Var::new(param),
             env: env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
-            body: ClosureBody::Rust(f),
+            body: f,
         }))
     }
 
@@ -269,34 +263,34 @@ impl Runtime {
     // FOAS: Term execution
     // -------------------------------------------------------------------------
 
-    /// Evaluate pre-allocated code with environment.
-    fn eval_code(&self, ptr: HeapPtr, env: &Env) -> HeapPtr {
+    /// Evaluate pre-allocated code with HeapPtr-keyed environment.
+    fn eval_code(&self, ptr: HeapPtr, env: &HashMap<HeapPtr, HeapPtr>) -> HeapPtr {
         let obj = self.heap.get(ptr);
         match obj {
-            HeapObj::Param(v) => env[&v],
+            HeapObj::Param => env[&ptr],
             HeapObj::App(f, g) => {
                 let f_ptr = self.eval_code(f, env);
                 let g_ptr = self.eval_code(g, env);
                 self.app(f_ptr, g_ptr)
             }
-            HeapObj::Closure(mut c) => {
-                assert!(c.env.is_empty(), "closure env must be empty (from expr_impl)");
-                // Capture env into closure
-                for (var, val) in env {
-                    if var != &c.param {
-                        c.env.insert(var.clone(), *val);
+            HeapObj::ExprClosure(mut c) => {
+                assert!(c.env.is_empty(), "closure env must be empty (from to_heap)");
+                // Capture env into closure, excluding our own param
+                for (&var, &val) in env {
+                    if var != c.param {
+                        c.env.insert(var, val);
                     }
                 }
-                self.heap.alloc(HeapObj::Closure(c))
+                self.heap.alloc(HeapObj::ExprClosure(c))
             }
-            HeapObj::I32(_) | HeapObj::ReadbackFreeVar { .. } => ptr,
+            HeapObj::I32(_) | HeapObj::ReadbackFreeVar { .. } | HeapObj::RustClosure(_) => ptr,
         }
     }
 
     /// Allocate a Term with the given environment, producing a HeapPtr.
     #[must_use]
     pub fn expr(&self, env: &Env, expr: &Expr) -> HeapPtr {
-        self.eval_code(expr.to_heap(self), env)
+        expr.to_heap(self, env)
     }
 
     /// Parse and evaluate an expression string.
@@ -315,7 +309,7 @@ impl Runtime {
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
         match obj {
-            HeapObj::Closure(_) => {
+            HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
                 let param = Var::new(format!("x{depth}"));
                 let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
                     var: param.clone(),
@@ -330,7 +324,7 @@ impl Runtime {
             ),
             HeapObj::I32(n) => Expr::Int(n),
             HeapObj::App(_, _) => panic!("unevaluated App in readback"),
-            HeapObj::Param(v) => panic!("unresolved Param({v:?}) in readback"),
+            HeapObj::Param => panic!("unresolved Param in readback"),
         }
     }
 
