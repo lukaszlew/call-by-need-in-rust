@@ -11,8 +11,23 @@ mod system_tests;
 
 use std::collections::HashMap;
 
-pub use expr::{Expr, Var};
+pub use expr::Expr;
 pub use heap::{Heap, HeapPtr};
+
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct Var(pub String);
+
+impl Var {
+    pub fn new(name: impl Into<String>) -> Self {
+        Var(name.into())
+    }
+}
+
+impl From<&str> for Var {
+    fn from(s: &str) -> Self {
+        Var::new(s)
+    }
+}
 
 /// Environment mapping variable names to heap pointers.
 pub type Env = HashMap<Var, HeapPtr>;
@@ -204,6 +219,12 @@ impl Runtime {
         }
     }
 
+    /// Allocate a heap object.
+    #[must_use]
+    pub fn alloc(&self, obj: HeapObj) -> HeapPtr {
+        self.heap.alloc(obj)
+    }
+
     /// Create a Closure with Rust code body.
     /// `param` is the name for the argument when the closure is applied.
     /// `env` is a list of (name, value) pairs to capture.
@@ -272,34 +293,10 @@ impl Runtime {
         }
     }
 
-    /// Allocate Expr to heap. All Vars become Param holes.
-    fn expr_impl(&self, expr: &Expr) -> HeapPtr {
-        match expr {
-            Expr::Var(v) => self.heap.alloc(HeapObj::Param(v.clone())),
-            Expr::Int(n) => self.i32(*n),
-            Expr::App { head, spine } => {
-                let mut ptr = self.expr_impl(head);
-                for arg in spine {
-                    ptr = self.app(ptr, self.expr_impl(arg));
-                }
-                ptr
-            }
-            Expr::Lam { param, body } => {
-                let body_ptr = self.expr_impl(body);
-                self.heap.alloc(HeapObj::Closure(Closure {
-                    param: param.clone(),
-                    env: HashMap::new(),
-                    body: ClosureBody::Code(body_ptr),
-                }))
-            }
-            Expr::Plus => self.plus(),
-        }
-    }
-
     /// Allocate a Term with the given environment, producing a HeapPtr.
     #[must_use]
     pub fn expr(&self, env: &Env, expr: &Expr) -> HeapPtr {
-        self.eval_code(self.expr_impl(expr), env)
+        self.eval_code(expr.to_heap(self), env)
     }
 
     /// Parse and evaluate an expression string.

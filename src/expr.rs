@@ -1,19 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Hash, Eq, PartialEq, Debug)]
-pub struct Var(pub String);
-
-impl Var {
-    pub fn new(name: impl Into<String>) -> Self {
-        Var(name.into())
-    }
-}
-
-impl From<&str> for Var {
-    fn from(s: &str) -> Self {
-        Var::new(s)
-    }
-}
+pub use super::{Var, HeapPtr, Closure, ClosureBody, HeapObj, Runtime};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -107,6 +94,30 @@ impl Expr {
                 spine: spine.iter().map(|e| e.rename(from, to)).collect(),
             },
             Expr::Int(_) | Expr::Plus => self.clone(),
+        }
+    }
+
+    /// Allocate Expr to heap. All Vars become Param holes.
+    pub fn to_heap(&self, rt: &Runtime) -> HeapPtr {
+        match self {
+            Expr::Var(v) => rt.alloc(HeapObj::Param(v.clone())),
+            Expr::Int(n) => rt.i32(*n),
+            Expr::App { head, spine } => {
+                let mut ptr = head.to_heap(rt);
+                for arg in spine {
+                    ptr = rt.app(ptr, arg.to_heap(rt));
+                }
+                ptr
+            }
+            Expr::Lam { param, body } => {
+                let body_ptr = body.to_heap(rt);
+                rt.alloc(HeapObj::Closure(Closure {
+                    param: param.clone(),
+                    env: HashMap::new(),
+                    body: ClosureBody::Code(body_ptr),
+                }))
+            }
+            Expr::Plus => rt.plus(),
         }
     }
 }
