@@ -1,7 +1,7 @@
 //! System tests for call-by-need implementation correctness.
 //! These tests verify internal invariants and edge cases.
 
-use crate::common::{add, counted_const, counted_inc};
+use crate::common::{add, counted_const, counted_inc, run_equality_tests};
 use crate::{EnvExt, ForceMode, Runtime};
 use rstest::rstest;
 
@@ -188,6 +188,6 @@ fn closure_captures_multiple(
 #[rstest]
 fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
     let content = include_str!("nbe.txt");
-    let stats = crate::run_equality_tests(content, mode).unwrap();
+    let stats = run_equality_tests(content, mode).unwrap();
     eprintln!("{mode:?}: {stats:?}");
 }
