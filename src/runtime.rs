@@ -198,22 +198,25 @@ impl Runtime {
             UpdateThunk(HeapPtr),
         }
         let mut stack: Vec<UseValueTo> = vec![];
+        let mut cached: Option<HeapObj> = None;
 
         loop {
-            let obj = self.heap.get(ptr);
+            let obj = cached.take().unwrap_or_else(|| self.heap.get(ptr));
             match obj {
                 HeapObj::App(f, arg) => {
                     stack.push(UseValueTo::UpdateThunk(ptr));
                     stack.push(UseValueTo::ApplyArg(arg));
-                    ptr = f
+                    ptr = f;
                 }
                 value => match stack.pop() {
                     None => return value,
                     Some(UseValueTo::UpdateThunk(thunk)) => {
                         self.heap.update(thunk, value.clone());
-                        ptr = thunk
+                        cached = Some(value);
                     }
-                    Some(UseValueTo::ApplyArg(arg)) => ptr = self.apply(value, arg),
+                    Some(UseValueTo::ApplyArg(arg)) => {
+                        ptr = self.apply(value, arg);
+                    }
                 },
             }
         }

@@ -189,14 +189,10 @@ fn closure_captures_multiple(
 fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
     let content = include_str!("nbe.txt");
     let stats = run_equality_tests(content, mode).unwrap();
-    let expected_reads = match mode {
-        ForceMode::Recursive => 4113,
-        ForceMode::Iterative => 4770,
-    };
     assert_eq!(stats, TestStats {
         bindings: 46,
         tests: 94,
         heap_size: 2949,
-        heap_stats: HeapStats { allocs: 2949, reads: expected_reads, writes: 657 },
+        heap_stats: HeapStats { allocs: 2949, reads: 4113, writes: 657 },
     });
 }
