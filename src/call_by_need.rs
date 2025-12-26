@@ -1,6 +1,11 @@
 pub mod expr;
 pub mod expr_parser;
 
+#[cfg(test)]
+mod common;
+#[cfg(test)]
+mod system_tests;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 

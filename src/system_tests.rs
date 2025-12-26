@@ -1,10 +1,8 @@
 //! System tests for call-by-need implementation correctness.
 //! These tests verify internal invariants and edge cases.
 
-mod common;
-
-use call_by_need_in_rust::{EnvExt, ForceMode, Runtime};
-use common::{add, counted_const, counted_inc};
+use crate::common::{add, counted_const, counted_inc};
+use crate::{EnvExt, ForceMode, Runtime};
 use rstest::rstest;
 
 // Test that identity doesn't corrupt shared arguments.
@@ -190,6 +188,6 @@ fn closure_captures_multiple(
 #[rstest]
 fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
     let content = include_str!("nbe.txt");
-    let stats = call_by_need_in_rust::run_equality_tests(content, mode).unwrap();
+    let stats = crate::run_equality_tests(content, mode).unwrap();
     eprintln!("{mode:?}: {stats:?}");
 }
