@@ -1,6 +1,7 @@
 Goal:
 - compare to sharing graph, esp copying.
 - perhaps implement sharing graph.
+- have a test that captures the copying behavior, count size on that one test.
 
 What could we do next?
 - eval experiments
