@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod expr_parser;
+pub mod heap;
 
 #[cfg(test)]
 mod common;
@@ -8,10 +9,10 @@ mod runtime_tests;
 #[cfg(test)]
 mod system_tests;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 pub use expr::{Expr, Var};
+pub use heap::{Heap, HeapPtr};
 
 /// Environment mapping variable names to heap pointers.
 pub type Env = HashMap<Var, HeapPtr>;
@@ -45,7 +46,7 @@ pub enum ClosureBody {
 /// # Why No Capture-Avoiding Substitution Needed
 /// We never substitute terms into terms. Instead:
 /// 1. When a lambda is instantiated, we capture current bindings into `env`
-/// 2. When applied, we extend `env` with param→arg and run the body
+/// 2. When applied, we extend `env` with param->arg and run the body
 /// 3. Variable lookup goes through `env`, not through textual substitution
 ///
 /// This environment-based approach sidesteps capture issues entirely.
@@ -83,10 +84,6 @@ impl HeapObj {
     }
 }
 
-// HeapPtr is an index into Runtime's heap.
-#[derive(Clone, Copy, Debug)]
-pub struct HeapPtr(usize);
-
 /// Which force implementation to use.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ForceMode {
@@ -101,7 +98,7 @@ pub enum ForceMode {
 
 /// Runtime for the lambda calculus with explicit heap.
 pub struct Runtime {
-    objects: RefCell<Vec<HeapObj>>,
+    heap: Heap<HeapObj>,
     /// Which force implementation to use.
     mode: ForceMode,
 }
@@ -110,7 +107,7 @@ impl Runtime {
     #[must_use]
     pub fn new(mode: ForceMode) -> Self {
         Runtime {
-            objects: RefCell::new(Vec::new()),
+            heap: Heap::new(),
             mode,
         }
     }
@@ -118,7 +115,7 @@ impl Runtime {
     /// Number of heap objects allocated.
     #[must_use]
     pub fn heap_size(&self) -> usize {
-        self.objects.borrow().len()
+        self.heap.len()
     }
 
     /// Force and extract i32.
@@ -130,9 +127,8 @@ impl Runtime {
     /// Mutate heap object to i32. Breaks referential transparency.
     /// Panics if the existing value is not I32.
     pub fn set_i32(&self, ptr: HeapPtr, val: i32) {
-        let mut objects = self.objects.borrow_mut();
-        assert!(matches!(objects[ptr.0], HeapObj::I32(_)));
-        objects[ptr.0] = HeapObj::I32(val);
+        assert!(matches!(self.heap.get(ptr), HeapObj::I32(_)));
+        self.heap.update(ptr, HeapObj::I32(val));
     }
 
     fn force(&self, ptr: HeapPtr) -> HeapObj {
@@ -157,27 +153,22 @@ impl Runtime {
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
                 spine.push(arg);
-                self.alloc(HeapObj::ReadbackFreeVar { var, spine })
+                self.heap.alloc(HeapObj::ReadbackFreeVar { var, spine })
             }
             _ => panic!("expected closure"),
         }
-    }
-
-    /// Update a thunk with its evaluated result (memoization).
-    fn update(&self, thunk: HeapPtr, value: HeapObj) {
-        self.objects.borrow_mut()[thunk.0] = value;
     }
 
     // Lazy call-by-need evaluation: force App(f, arg) by forcing f, applying it to arg,
     // forcing the result, and caching the result in place of the App.
     // Recursive version - simple but can overflow stack on deep thunk chains.
     fn force_recursive(&self, ptr: HeapPtr) -> HeapObj {
-        let obj = self.objects.borrow()[ptr.0].clone();
+        let obj = self.heap.get(ptr);
         match obj {
             HeapObj::App(f, arg) => {
                 let result_ptr = self.apply(self.force_recursive(f), arg);
                 let result = self.force_recursive(result_ptr);
-                self.update(ptr, result.clone());
+                self.heap.update(ptr, result.clone());
                 result
             }
             v => v,
@@ -194,7 +185,7 @@ impl Runtime {
         let mut stack: Vec<UseValueTo> = vec![];
 
         loop {
-            let obj = self.objects.borrow()[ptr.0].clone();
+            let obj = self.heap.get(ptr);
             match obj {
                 HeapObj::App(f, arg) => {
                     stack.push(UseValueTo::UpdateThunk(ptr));
@@ -204,24 +195,13 @@ impl Runtime {
                 value => match stack.pop() {
                     None => return value,
                     Some(UseValueTo::UpdateThunk(thunk)) => {
-                        self.update(thunk, value.clone());
+                        self.heap.update(thunk, value.clone());
                         ptr = thunk
                     }
                     Some(UseValueTo::ApplyArg(arg)) => ptr = self.apply(value, arg),
                 },
             }
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // Allocation
-    // -------------------------------------------------------------------------
-
-    fn alloc(&self, obj: HeapObj) -> HeapPtr {
-        let mut objects = self.objects.borrow_mut();
-        let ptr = HeapPtr(objects.len());
-        objects.push(obj);
-        ptr
     }
 
     /// Create a Closure with Rust code body.
@@ -235,7 +215,7 @@ impl Runtime {
         env: &[(&str, HeapPtr)],
         f: fn(&Env, &Runtime) -> HeapPtr,
     ) -> HeapPtr {
-        self.alloc(HeapObj::Closure(Closure {
+        self.heap.alloc(HeapObj::Closure(Closure {
             param: Var::new(param),
             env: env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
             body: ClosureBody::Rust(f),
@@ -245,13 +225,13 @@ impl Runtime {
     /// Create HeapPtr for i32.
     #[must_use]
     pub fn i32(&self, n: i32) -> HeapPtr {
-        self.alloc(HeapObj::I32(n))
+        self.heap.alloc(HeapObj::I32(n))
     }
 
     /// Allocate unevaluated lambda application.
     #[must_use]
     pub fn app(&self, f: HeapPtr, arg: HeapPtr) -> HeapPtr {
-        self.alloc(HeapObj::App(f, arg))
+        self.heap.alloc(HeapObj::App(f, arg))
     }
 
     /// plus = \a.\b. a + b (primitive addition for i32)
@@ -270,7 +250,7 @@ impl Runtime {
 
     /// Evaluate pre-allocated code with environment.
     fn eval_code(&self, ptr: HeapPtr, env: &Env) -> HeapPtr {
-        let obj = self.objects.borrow()[ptr.0].clone();
+        let obj = self.heap.get(ptr);
         match obj {
             HeapObj::Param(v) => env[&v],
             HeapObj::App(f, g) => {
@@ -286,7 +266,7 @@ impl Runtime {
                         c.env.insert(var.clone(), *val);
                     }
                 }
-                self.alloc(HeapObj::Closure(c))
+                self.heap.alloc(HeapObj::Closure(c))
             }
             HeapObj::I32(_) | HeapObj::ReadbackFreeVar { .. } => ptr,
         }
@@ -295,7 +275,7 @@ impl Runtime {
     /// Allocate Expr to heap. All Vars become Param holes.
     fn expr_impl(&self, expr: &Expr) -> HeapPtr {
         match expr {
-            Expr::Var(v) => self.alloc(HeapObj::Param(v.clone())),
+            Expr::Var(v) => self.heap.alloc(HeapObj::Param(v.clone())),
             Expr::Int(n) => self.i32(*n),
             Expr::App { head, spine } => {
                 let mut ptr = self.expr_impl(head);
@@ -306,7 +286,7 @@ impl Runtime {
             }
             Expr::Lam { param, body } => {
                 let body_ptr = self.expr_impl(body);
-                self.alloc(HeapObj::Closure(Closure {
+                self.heap.alloc(HeapObj::Closure(Closure {
                     param: param.clone(),
                     env: HashMap::new(),
                     body: ClosureBody::Code(body_ptr),
@@ -340,7 +320,7 @@ impl Runtime {
         match obj {
             HeapObj::Closure(_) => {
                 let param = Var::new(format!("x{depth}"));
-                let free_var = self.alloc(HeapObj::ReadbackFreeVar {
+                let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
                     var: param.clone(),
                     spine: vec![],
                 });
