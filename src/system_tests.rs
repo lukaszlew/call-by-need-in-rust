@@ -196,3 +196,42 @@ fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode
         heap_stats: HeapStats { allocs: 2949, reads: 4113, writes: 657 },
     });
 }
+
+// Captured values not used in body should not be copied.
+// \x. \y. x  applied to large App chain: chain is captured in env, not copied.
+#[rstest]
+fn captured_app_chain_not_copied(
+    #[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode,
+) {
+    let rt = Runtime::new(mode);
+
+    // Build large app chain: id (id (id ... (id 42)))
+    // 100 App nodes + 100 closures + 1 i32
+    let depth = 100;
+    let id = rt.run(r"\z. z");
+    let mut big = rt.i32(42);
+    for _ in 0..depth {
+        big = rt.app(id, big);
+    }
+    let heap_after_big = rt.heap_size();
+
+    // Two closures: \x. \y. x  and  \a. \b. a
+    // Inner body is just a Param, not the captured value
+    let f = rt.run(r"\x. \y. x");
+    let g = rt.run(r"\a. \b. a");
+
+    // Apply both to big, then to dummy
+    // f big 0 = big,  g big 0 = big
+    let r1 = rt.app(rt.app(f, big), rt.i32(0));
+    let r2 = rt.app(rt.app(g, big), rt.i32(0));
+
+    let heap_after_apply = rt.heap_size();
+
+    // Overhead: 14 nodes (closures + apps + params + inds)
+    // NOT 2 * depth (200) which would indicate chain was copied
+    assert_eq!(heap_after_apply - heap_after_big, 14);
+
+    // Verify correctness: forcing should yield 42
+    assert_eq!(rt.get_i32(r1), 42);
+    assert_eq!(rt.get_i32(r2), 42);
+}
