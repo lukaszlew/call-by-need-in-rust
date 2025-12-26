@@ -1,16 +1,14 @@
 What could we do next?
-- we need more tests before sharing and for that we need a parser and eq tester and perhaps readback
-- lam
-- pairs
-- call by push value
-- tail call optimization
-- How to change enum Value to union Value? Rc is in a way. ManualDrop?
-- Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
+- eval experiments
+  - call by push value
+  - linear logic reduction
+  - It would be very interesting to have explicit weakening and contraction (instead of Rc?) and be closer to linear lambda calculus.
+  - manual thunking
+- pairs, sums
 - Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
+- Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
 - Would be very cool to have some runtime benchmarks and maybe compute number of allocations.
 - Would be even cooler to use [Haskell's benchmarks](https://gitlab.haskell.org/ghc/ghc/-/wikis/building/running-tests/performance-tests)
-- How could be print body of the lambdas? Abstract interpretation?
-- It would be very interesting to have explicit weakening and contraction (instead of Rc?) and be closer to linear lambda calculus.
 
 ## Differences from STG
 
