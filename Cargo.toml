@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-path = "src/call_by_need.rs"
+path = "src/runtime.rs"
 
 [dependencies]
 chumsky = "0.9"
