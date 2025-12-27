@@ -2,7 +2,7 @@
 //! These tests verify internal invariants and edge cases.
 
 use crate::common::{add, counted_const, counted_inc, run_equality_tests};
-use crate::{EnvExt, ForceMode, Runtime};
+use crate::{EnvExt, ForceMode, HeapStats, Runtime};
 use rstest::rstest;
 
 // Test that identity doesn't corrupt shared arguments.
@@ -191,9 +191,14 @@ fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode
     let stats = run_equality_tests(content, mode).unwrap();
     assert_eq!(stats.bindings, 51);
     assert_eq!(stats.tests, 126); // 148 - 22 indexing tests
-    assert!(stats.heap_size > 0);
-    assert!(stats.heap_stats.allocs > 0);
-    assert!(stats.heap_stats.writes > 0);
+    assert_eq!(
+        stats.heap_stats,
+        HeapStats {
+            reads: 4503,
+            allocs: 3344,
+            writes: 714
+        }
+    );
 }
 
 // Captured values not used in body should not be copied.
