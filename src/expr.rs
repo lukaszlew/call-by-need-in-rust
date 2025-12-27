@@ -48,11 +48,6 @@ pub enum Expr {
         spine: Vec<Expr>,
     },
     Tuple(Vec<Expr>),
-    /// Tuple indexing: `tuple[index]`.
-    Index {
-        tuple: Box<Expr>,
-        index: Box<Expr>,
-    },
     Int(i32),
     Plus,
 }
@@ -100,11 +95,6 @@ impl Expr {
                 fvs
             }
             Expr::Tuple(elems) => elems.iter().flat_map(Expr::free_vars).collect(),
-            Expr::Index { tuple, index } => {
-                let mut fvs = tuple.free_vars();
-                fvs.extend(index.free_vars());
-                fvs
-            }
             Expr::Int(_) | Expr::Plus => HashSet::new(),
         }
     }
@@ -147,10 +137,6 @@ impl Expr {
                 spine: spine.iter().map(|e| e.rename(from, to)).collect(),
             },
             Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| e.rename(from, to)).collect()),
-            Expr::Index { tuple, index } => Expr::Index {
-                tuple: Box::new(tuple.rename(from, to)),
-                index: Box::new(index.rename(from, to)),
-            },
             Expr::Int(_) | Expr::Plus => self.clone(),
         }
     }
@@ -180,11 +166,6 @@ impl Expr {
             Expr::Tuple(elems) => {
                 let ptrs: Vec<_> = elems.iter().map(|e| e.to_heap(rt, env)).collect();
                 rt.alloc(HeapObj::tuple(ptrs))
-            }
-            Expr::Index { tuple, index } => {
-                let tuple_ptr = tuple.to_heap(rt, env);
-                let index_ptr = index.to_heap(rt, env);
-                rt.alloc(HeapObj::index(tuple_ptr, index_ptr))
             }
             Expr::Plus => rt.plus(),
         }

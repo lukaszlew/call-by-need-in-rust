@@ -79,8 +79,6 @@ impl HeapPat {
 pub enum Tag {
     /// App(f, arg) - unevaluated function application
     App,
-    /// Index(tuple, index) - unevaluated tuple indexing
-    Index,
     /// Int value (field 0 is Int)
     Int,
     /// Tuple of n elements (all fields are Ptr)
@@ -149,10 +147,6 @@ impl HeapObj {
         HeapObj { tag: Tag::App, fields: vec![Field::Ptr(f), Field::Ptr(arg)], closure: None, var: None }
     }
 
-    fn index(tuple: HeapPtr, idx: HeapPtr) -> Self {
-        HeapObj { tag: Tag::Index, fields: vec![Field::Ptr(tuple), Field::Ptr(idx)], closure: None, var: None }
-    }
-
     fn int(n: i32) -> Self {
         HeapObj { tag: Tag::Int, fields: vec![Field::Int(n)], closure: None, var: None }
     }
@@ -214,7 +208,6 @@ impl HeapObj {
     fn fmt_short(&self) -> String {
         match self.tag {
             Tag::App => format!("App({:?}, {:?})", self.ptr(0), self.ptr(1)),
-            Tag::Index => format!("Index({:?}, {:?})", self.ptr(0), self.ptr(1)),
             Tag::Int => format!("Int({})", self.unwrap_i32()),
             Tag::Tuple => format!("Tuple({:?})", self.ptrs()),
             Tag::Closure => match &self.closure {
@@ -357,16 +350,6 @@ impl Runtime {
                 self.heap.update(ptr, result.clone());
                 result
             }
-            Tag::Index => {
-                let tuple = obj.ptr(0);
-                let index = obj.ptr(1);
-                let elems = self.force_recursive(tuple).unwrap_tuple();
-                let i = self.force_recursive(index).unwrap_i32() as usize;
-                let elem_ptr = elems[i];
-                let result = self.force_recursive(elem_ptr);
-                self.heap.update(ptr, result.clone());
-                result
-            }
             _ => obj,
         }
     }
@@ -377,8 +360,6 @@ impl Runtime {
         enum UseValueTo {
             ApplyArg(HeapPtr),
             UpdateThunk(HeapPtr),
-            IndexWith(HeapPtr),   // index ptr
-            IndexInto(Vec<HeapPtr>), // tuple elems
         }
         let mut stack: Vec<UseValueTo> = vec![];
         let mut cached: Option<HeapObj> = None;
@@ -393,13 +374,6 @@ impl Runtime {
                     stack.push(UseValueTo::ApplyArg(arg));
                     ptr = f;
                 }
-                Tag::Index => {
-                    let tuple = obj.ptr(0);
-                    let index = obj.ptr(1);
-                    stack.push(UseValueTo::UpdateThunk(ptr));
-                    stack.push(UseValueTo::IndexWith(index));
-                    ptr = tuple;
-                }
                 _ => match stack.pop() {
                     None => return obj,
                     Some(UseValueTo::UpdateThunk(thunk)) => {
@@ -408,15 +382,6 @@ impl Runtime {
                     }
                     Some(UseValueTo::ApplyArg(arg)) => {
                         ptr = self.apply(obj, arg);
-                    }
-                    Some(UseValueTo::IndexWith(index)) => {
-                        let elems = obj.unwrap_tuple();
-                        stack.push(UseValueTo::IndexInto(elems));
-                        ptr = index;
-                    }
-                    Some(UseValueTo::IndexInto(elems)) => {
-                        let i = obj.unwrap_i32() as usize;
-                        ptr = elems[i];
                     }
                 },
             }
@@ -489,13 +454,6 @@ impl Runtime {
                 let elems = obj.ptrs();
                 let copied: Vec<_> = elems.iter().map(|e| self.eval_code(*e, env)).collect();
                 self.heap.alloc(HeapObj::tuple(copied))
-            }
-            Tag::Index => {
-                let tuple = obj.ptr(0);
-                let index = obj.ptr(1);
-                let tuple_ptr = self.eval_code(tuple, env);
-                let index_ptr = self.eval_code(index, env);
-                self.heap.alloc(HeapObj::index(tuple_ptr, index_ptr))
             }
             Tag::Closure => {
                 match obj.closure.unwrap() {
@@ -570,7 +528,6 @@ impl Runtime {
             }
             Tag::Int => Expr::Int(obj.unwrap_i32()),
             Tag::App => panic!("unevaluated App in readback"),
-            Tag::Index => panic!("unevaluated Index in readback"),
             Tag::Param => panic!("unresolved Param in readback"),
         }
     }

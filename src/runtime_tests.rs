@@ -241,7 +241,7 @@ fn nbe_stuck_app(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: For
 }
 
 #[test]
-fn heap_comparison_pattern_vs_index() {
+fn heap_pattern_matching() {
     println!("\n=== Pattern matching: (\\(a,_).a) (10,20) ===");
     let rt = Runtime::new(ForceMode::Iterative);
     let ptr = rt.run(r"(\(a,_).a) (10,20)");
@@ -250,15 +250,6 @@ fn heap_comparison_pattern_vs_index() {
     let result = rt.get_i32(ptr);
     println!("-- After force (result = {}):", result);
     rt.dump_heap();
-    println!("Stats: {:?}\n", rt.stats());
-
-    println!("=== Indexing: (10,20)[0] ===");
-    let rt = Runtime::new(ForceMode::Iterative);
-    let ptr = rt.run(r"(10,20)[0]");
-    println!("-- Before force:");
-    rt.dump_heap();
-    let result = rt.get_i32(ptr);
-    println!("-- After force (result = {}):", result);
-    rt.dump_heap();
     println!("Stats: {:?}", rt.stats());
+    assert_eq!(result, 10);
 }
