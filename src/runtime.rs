@@ -11,7 +11,7 @@ mod system_tests;
 
 use std::collections::HashMap;
 
-pub use expr::Expr;
+pub use expr::{Expr, Pat};
 pub use heap::{Heap, HeapPtr, HeapStats};
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -51,23 +51,43 @@ pub struct RustClosure {
     pub body: fn(&Env, &Runtime) -> HeapPtr,
 }
 
+/// Pattern on the heap. Maps to Param placeholders in the closure body.
+#[derive(Clone, Debug)]
+pub enum HeapPat {
+    /// Variable pattern - points to Param placeholder.
+    Var(HeapPtr),
+    /// Tuple pattern.
+    Tuple(Vec<HeapPat>),
+}
+
+impl HeapPat {
+    /// Collect all Param HeapPtrs in this pattern.
+    pub fn params(&self) -> Vec<HeapPtr> {
+        match self {
+            HeapPat::Var(ptr) => vec![*ptr],
+            HeapPat::Tuple(pats) => pats.iter().flat_map(HeapPat::params).collect(),
+        }
+    }
+}
+
 /// Closure from parsed Expr. Uses HeapPtr-based env for efficient lookup.
-/// `param` points to the Param placeholder in `body`.
+/// `param` is the pattern with Param placeholders in `body`.
 #[derive(Clone)]
 pub struct ExprClosure {
-    pub param: HeapPtr,
+    pub param: HeapPat,
     pub env: HashMap<HeapPtr, HeapPtr>,
     pub body: HeapPtr,
 }
 
-// HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
-// Evaluation transmutes App into I32 or Closure.
+// HeapObj represents unevaluated (App) or evaluated (I32, Closure, Tuple) lambda calculus terms.
+// Evaluation transmutes App into I32, Closure, or Tuple.
 //
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
+    Tuple(Vec<HeapPtr>),
     RustClosure(RustClosure),
     ExprClosure(ExprClosure),
     /// Parameter placeholder, resolved via HeapPtr lookup in eval_code.
@@ -84,6 +104,13 @@ impl HeapObj {
         match self {
             HeapObj::I32(n) => n,
             _ => panic!("expected i32"),
+        }
+    }
+
+    fn unwrap_tuple(self) -> Vec<HeapPtr> {
+        match self {
+            HeapObj::Tuple(elems) => elems,
+            _ => panic!("expected tuple"),
         }
     }
 }
@@ -160,10 +187,7 @@ impl Runtime {
             }
             HeapObj::ExprClosure(c) => {
                 let mut env = c.env;
-                assert!(
-                    env.insert(c.param, arg).is_none(),
-                    "param shadows capture"
-                );
+                self.match_pattern(&c.param, arg, &mut env);
                 self.eval_code(c.body, &env)
             }
             HeapObj::ReadbackFreeVar { var, mut spine } => {
@@ -171,6 +195,29 @@ impl Runtime {
                 self.heap.alloc(HeapObj::ReadbackFreeVar { var, spine })
             }
             _ => panic!("expected closure"),
+        }
+    }
+
+    /// Match a pattern against an argument, adding bindings to env.
+    /// Forces tuple structure lazily (only when pattern requires it).
+    fn match_pattern(
+        &self,
+        pat: &HeapPat,
+        arg: HeapPtr,
+        env: &mut HashMap<HeapPtr, HeapPtr>,
+    ) {
+        match pat {
+            HeapPat::Var(param_ptr) => {
+                assert!(env.insert(*param_ptr, arg).is_none(), "param shadows capture");
+            }
+            HeapPat::Tuple(pats) => {
+                // Force arg to get tuple structure
+                let tuple = self.force(arg).unwrap_tuple();
+                assert_eq!(pats.len(), tuple.len(), "tuple pattern arity mismatch");
+                for (p, a) in pats.iter().zip(tuple) {
+                    self.match_pattern(p, a, env);
+                }
+            }
         }
     }
 
@@ -282,11 +329,16 @@ impl Runtime {
                 let g_ptr = self.eval_code(g, env);
                 self.app(f_ptr, g_ptr)
             }
+            HeapObj::Tuple(elems) => {
+                let copied: Vec<_> = elems.iter().map(|e| self.eval_code(*e, env)).collect();
+                self.heap.alloc(HeapObj::Tuple(copied))
+            }
             HeapObj::ExprClosure(mut c) => {
                 assert!(c.env.is_empty(), "closure env must be empty (from to_heap)");
-                // Capture env into closure, excluding our own param
+                // Capture env into closure, excluding our own params
+                let params = c.param.params();
                 for (&var, &val) in env {
-                    if var != c.param {
+                    if !params.contains(&var) {
                         c.env.insert(var, val);
                     }
                 }
@@ -318,7 +370,7 @@ impl Runtime {
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
         match obj {
-            HeapObj::RustClosure(_) | HeapObj::ExprClosure(_) => {
+            HeapObj::RustClosure(_) => {
                 let param = Var::new(format!("x{depth}"));
                 let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
                     var: param.clone(),
@@ -327,13 +379,50 @@ impl Runtime {
                 let body = self.apply(obj, free_var);
                 Expr::lam(param, self.readback(body, depth + 1))
             }
+            HeapObj::ExprClosure(ref c) => {
+                // Create free variable(s) matching the pattern structure
+                let (pat, arg, new_depth) = self.readback_pattern(&c.param, depth);
+                let body = self.apply(obj, arg);
+                Expr::lam_pat(pat, self.readback(body, new_depth))
+            }
             HeapObj::ReadbackFreeVar { var, spine } => Expr::app(
                 Expr::Var(var),
                 spine.into_iter().map(|arg| self.readback(arg, depth)).collect(),
             ),
+            HeapObj::Tuple(elems) => {
+                Expr::Tuple(elems.into_iter().map(|e| self.readback(e, depth)).collect())
+            }
             HeapObj::I32(n) => Expr::Int(n),
             HeapObj::App(_, _) => panic!("unevaluated App in readback"),
             HeapObj::Param => panic!("unresolved Param in readback"),
+        }
+    }
+
+    /// Create a pattern and matching free argument for readback.
+    /// Returns (pattern for Expr, heap argument to apply, new depth).
+    fn readback_pattern(&self, pat: &HeapPat, depth: usize) -> (Pat, HeapPtr, usize) {
+        match pat {
+            HeapPat::Var(_) => {
+                let var = Var::new(format!("x{depth}"));
+                let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
+                    var: var.clone(),
+                    spine: vec![],
+                });
+                (Pat::Var(var), free_var, depth + 1)
+            }
+            HeapPat::Tuple(pats) => {
+                let mut new_depth = depth;
+                let mut expr_pats = Vec::with_capacity(pats.len());
+                let mut heap_args = Vec::with_capacity(pats.len());
+                for p in pats {
+                    let (expr_pat, heap_arg, d) = self.readback_pattern(p, new_depth);
+                    expr_pats.push(expr_pat);
+                    heap_args.push(heap_arg);
+                    new_depth = d;
+                }
+                let tuple = self.heap.alloc(HeapObj::Tuple(heap_args));
+                (Pat::Tuple(expr_pats), tuple, new_depth)
+            }
         }
     }
 

@@ -1,12 +1,43 @@
 use std::collections::{HashMap, HashSet};
 
-pub use super::{Env, ExprClosure, HeapObj, HeapPtr, Runtime, Var};
+pub use super::{Env, ExprClosure, HeapObj, HeapPat, HeapPtr, Runtime, Var};
+
+/// Pattern for lambda parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pat {
+    Var(Var),
+    Tuple(Vec<Pat>),
+}
+
+impl Pat {
+    /// Collect all variables bound by this pattern.
+    pub fn vars(&self) -> Vec<&Var> {
+        match self {
+            Pat::Var(v) => vec![v],
+            Pat::Tuple(pats) => pats.iter().flat_map(Pat::vars).collect(),
+        }
+    }
+
+    /// Check if pattern binds a variable.
+    pub fn binds(&self, var: &Var) -> bool {
+        match self {
+            Pat::Var(v) => v == var,
+            Pat::Tuple(pats) => pats.iter().any(|p| p.binds(var)),
+        }
+    }
+
+    /// Rename free occurrences of `from` to `to` in the pattern.
+    /// (Patterns only bind, so this is a no-op, but included for completeness.)
+    pub fn rename(&self, _from: &Var, _to: &Var) -> Pat {
+        self.clone()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Var(Var),
     Lam {
-        param: Var,
+        param: Pat,
         body: Box<Expr>,
     },
     /// Application in spine form: `App { head, spine: [a, b, c] }` represents `head a b c`.
@@ -16,6 +47,7 @@ pub enum Expr {
         head: Box<Expr>,
         spine: Vec<Expr>,
     },
+    Tuple(Vec<Expr>),
     Int(i32),
     Plus,
 }
@@ -50,7 +82,9 @@ impl Expr {
             Expr::Var(v) => HashSet::from([v.clone()]),
             Expr::Lam { param, body } => {
                 let mut fvs = body.free_vars();
-                fvs.remove(param);
+                for v in param.vars() {
+                    fvs.remove(v);
+                }
                 fvs
             }
             Expr::App { head, spine } => {
@@ -60,12 +94,21 @@ impl Expr {
                 }
                 fvs
             }
+            Expr::Tuple(elems) => elems.iter().flat_map(Expr::free_vars).collect(),
             Expr::Int(_) | Expr::Plus => HashSet::new(),
         }
     }
 
-    /// Create a Lam.
+    /// Create a Lam with a variable pattern.
     pub fn lam(param: Var, body: Expr) -> Expr {
+        Expr::Lam {
+            param: Pat::Var(param),
+            body: Box::new(body),
+        }
+    }
+
+    /// Create a Lam with a pattern.
+    pub fn lam_pat(param: Pat, body: Expr) -> Expr {
         Expr::Lam {
             param,
             body: Box::new(body),
@@ -79,7 +122,7 @@ impl Expr {
             Expr::Var(v) if v == from => Expr::Var(to.clone()),
             Expr::Var(v) => Expr::Var(v.clone()),
             Expr::Lam { param, body } => {
-                if param == from {
+                if param.binds(from) {
                     // from is shadowed, don't rename in body
                     self.clone()
                 } else {
@@ -93,6 +136,7 @@ impl Expr {
                 head: Box::new(head.rename(from, to)),
                 spine: spine.iter().map(|e| e.rename(from, to)).collect(),
             },
+            Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| e.rename(from, to)).collect()),
             Expr::Int(_) | Expr::Plus => self.clone(),
         }
     }
@@ -114,17 +158,37 @@ impl Expr {
                 ptr
             }
             Expr::Lam { param, body } => {
-                let param_ptr = rt.alloc(HeapObj::Param);
                 let mut env = env.clone();
-                env.insert(param.clone(), param_ptr);
+                let heap_pat = param.to_heap(rt, &mut env);
                 let body_ptr = body.to_heap(rt, &env);
                 rt.alloc(HeapObj::ExprClosure(ExprClosure {
-                    param: param_ptr,
+                    param: heap_pat,
                     env: HashMap::new(),
                     body: body_ptr,
                 }))
             }
+            Expr::Tuple(elems) => {
+                let ptrs: Vec<_> = elems.iter().map(|e| e.to_heap(rt, env)).collect();
+                rt.alloc(HeapObj::Tuple(ptrs))
+            }
             Expr::Plus => rt.plus(),
+        }
+    }
+}
+
+impl Pat {
+    /// Convert pattern to heap representation, allocating Param placeholders
+    /// and adding variable bindings to env.
+    pub fn to_heap(&self, rt: &Runtime, env: &mut Env) -> HeapPat {
+        match self {
+            Pat::Var(v) => {
+                let param_ptr = rt.alloc(HeapObj::Param);
+                env.insert(v.clone(), param_ptr);
+                HeapPat::Var(param_ptr)
+            }
+            Pat::Tuple(pats) => {
+                HeapPat::Tuple(pats.iter().map(|p| p.to_heap(rt, env)).collect())
+            }
         }
     }
 }

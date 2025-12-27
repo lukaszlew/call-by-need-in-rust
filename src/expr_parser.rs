@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 
-use crate::expr::{Expr, Var};
+use crate::expr::{Expr, Pat, Var};
 
 pub fn parse(input: &str) -> Expr {
     parser().parse(input).expect("parse error")
@@ -10,6 +10,31 @@ fn parser() -> impl Parser<char, Expr, Error = Simple<char>> {
     expr()
 }
 
+/// Parse a pattern: variable or tuple pattern.
+fn pattern() -> impl Parser<char, Pat, Error = Simple<char>> + Clone {
+    recursive(|pat| {
+        let ident = text::ident().padded();
+        let var_pat = ident.map(|s| Pat::Var(Var::new(s)));
+
+        // Tuple pattern: (p1, p2, ...) with at least one comma
+        let tuple_pat = pat
+            .clone()
+            .separated_by(just(',').padded())
+            .at_least(1)
+            .delimited_by(just('(').padded(), just(')').padded())
+            .map(|pats| {
+                if pats.len() == 1 {
+                    // (p) is just grouping, not a 1-tuple
+                    pats.into_iter().next().unwrap()
+                } else {
+                    Pat::Tuple(pats)
+                }
+            });
+
+        tuple_pat.or(var_pat)
+    })
+}
+
 fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
     recursive(|expr| {
         let ident = text::ident().padded();
@@ -17,13 +42,27 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
         let var = ident.map(|s| Expr::Var(Var::new(s)));
 
         let lambda = just('\\')
-            .ignore_then(ident.map(Var::new))
-            .then_ignore(just('.'))
+            .ignore_then(pattern())
+            .then_ignore(just('.').padded())
             .then(expr.clone())
-            .map(|(param, body)| Expr::lam(param, body))
+            .map(|(param, body)| Expr::lam_pat(param, body))
             .padded();
 
-        let parens = expr.delimited_by(just('('), just(')')).padded();
+        // Tuple or parenthesized expression
+        let paren_or_tuple = expr
+            .clone()
+            .separated_by(just(',').padded())
+            .at_least(1)
+            .delimited_by(just('(').padded(), just(')').padded())
+            .map(|exprs| {
+                if exprs.len() == 1 {
+                    // (e) is just grouping
+                    exprs.into_iter().next().unwrap()
+                } else {
+                    Expr::Tuple(exprs)
+                }
+            })
+            .padded();
 
         let int = just('-')
             .or_not()
@@ -36,7 +75,7 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         let plus = just('+').to(Expr::Plus).padded();
 
-        let atom = lambda.or(parens).or(int).or(plus).or(var);
+        let atom = lambda.or(paren_or_tuple).or(int).or(plus).or(var);
 
         atom.clone()
             .then(atom.repeated())
@@ -133,6 +172,53 @@ mod tests {
                 head: Box::new(Expr::Plus),
                 spine: vec![Expr::Int(1), Expr::Int(2)],
             }
+        );
+    }
+
+    #[test]
+    fn parse_tuple() {
+        assert_eq!(parse("(1, 2)"), Expr::Tuple(vec![Expr::Int(1), Expr::Int(2)]));
+        assert_eq!(
+            parse("(1, 2, 3)"),
+            Expr::Tuple(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)])
+        );
+    }
+
+    #[test]
+    fn parse_nested_tuple() {
+        assert_eq!(
+            parse("(1, (2, 3))"),
+            Expr::Tuple(vec![
+                Expr::Int(1),
+                Expr::Tuple(vec![Expr::Int(2), Expr::Int(3)])
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_tuple_pattern_lambda() {
+        // \(x, y). x
+        assert_eq!(
+            parse(r"\(x, y). x"),
+            Expr::lam_pat(
+                Pat::Tuple(vec![Pat::Var("x".into()), Pat::Var("y".into())]),
+                Expr::Var("x".into())
+            )
+        );
+    }
+
+    #[test]
+    fn parse_nested_pattern() {
+        // \(x, (y, z)). y
+        assert_eq!(
+            parse(r"\(x, (y, z)). y"),
+            Expr::lam_pat(
+                Pat::Tuple(vec![
+                    Pat::Var("x".into()),
+                    Pat::Tuple(vec![Pat::Var("y".into()), Pat::Var("z".into())])
+                ]),
+                Expr::Var("y".into())
+            )
         );
     }
 }

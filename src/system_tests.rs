@@ -190,10 +190,10 @@ fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode
     let content = include_str!("nbe.txt");
     let stats = run_equality_tests(content, mode).unwrap();
     assert_eq!(stats, TestStats {
-        bindings: 46,
-        tests: 94,
-        heap_size: 2949,
-        heap_stats: HeapStats { allocs: 2949, reads: 4113, writes: 657 },
+        bindings: 51,
+        tests: 126,
+        heap_size: 3344,
+        heap_stats: HeapStats { allocs: 3344, reads: 4503, writes: 714 },
     });
 }
 
@@ -234,4 +234,31 @@ fn captured_app_chain_not_copied(
     // Verify correctness: forcing should yield 42
     assert_eq!(rt.get_i32(r1), 42);
     assert_eq!(rt.get_i32(r2), 42);
+}
+
+// Tuple elements are lazy (not forced until pattern demands it).
+// This test uses counters to verify laziness, which can't be expressed in nbe.txt.
+#[rstest]
+fn tuple_elements_lazy(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode: ForceMode) {
+    let rt = Runtime::new(mode);
+    let counter = rt.i32(0);
+    let inc = counted_inc(&rt, counter);
+
+    // Create tuple with thunk as second element
+    let thunk = rt.app(inc, rt.i32(10));
+    // Build tuple manually with thunk as second element
+    let fst_val = rt.i32(1);
+    let tuple_ptr = rt.alloc(crate::HeapObj::Tuple(vec![fst_val, thunk]));
+
+    // Access first element only - thunk should not be forced
+    let get_fst = rt.run(r"\(x, y). x");
+    let result = rt.app(get_fst, tuple_ptr);
+    assert_eq!(rt.get_i32(result), 1);
+    assert_eq!(rt.get_i32(counter), 0); // thunk not forced
+
+    // Now access second element
+    let get_snd = rt.run(r"\(x, y). y");
+    let result = rt.app(get_snd, tuple_ptr);
+    assert_eq!(rt.get_i32(result), 11);
+    assert_eq!(rt.get_i32(counter), 1); // now forced
 }
