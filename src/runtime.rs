@@ -43,14 +43,6 @@ impl EnvExt for Env {
     }
 }
 
-/// Closure with Rust function body. Uses Var-based env for ergonomic API.
-#[derive(Clone)]
-pub struct RustClosure {
-    pub param: Var,
-    pub env: Env,
-    pub body: fn(&Env, &Runtime) -> HeapPtr,
-}
-
 /// Pattern on the heap. Maps to Param placeholders in the closure body.
 #[derive(Clone, Debug)]
 pub enum HeapPat {
@@ -77,17 +69,12 @@ impl HeapPat {
 /// Object tag - discriminates heap object types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
-    /// App(f, arg) - unevaluated function application
     App,
-    /// Int value (field 0 is Int)
     Int,
-    /// Tuple of n elements (all fields are Ptr)
     Tuple,
-    /// Closure (has ClosureData)
-    Closure,
-    /// Parameter placeholder
+    RustClosure,
+    ExprClosure,
     Param,
-    /// Neutral term for readback: head applied to spine
     Neutral,
 }
 
@@ -114,7 +101,7 @@ impl Field {
     }
 }
 
-/// Closure-specific data (only present when tag == Closure).
+/// Closure data variants (tag determines which).
 #[derive(Clone)]
 pub enum ClosureData {
     Rust {
@@ -130,14 +117,11 @@ pub enum ClosureData {
 }
 
 /// Heap object with uniform tagged representation.
-/// https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 pub struct HeapObj {
     pub tag: Tag,
     pub fields: Vec<Field>,
-    /// Closure-specific data (only for Tag::Closure)
     pub closure: Option<ClosureData>,
-    /// Variable name for Neutral (readback free var)
     pub var: Option<Var>,
 }
 
@@ -157,7 +141,7 @@ impl HeapObj {
 
     fn rust_closure(param: Var, env: HashMap<Var, HeapPtr>, body: fn(&Env, &Runtime) -> HeapPtr) -> Self {
         HeapObj {
-            tag: Tag::Closure,
+            tag: Tag::RustClosure,
             fields: vec![],
             closure: Some(ClosureData::Rust { param, env, body }),
             var: None,
@@ -166,7 +150,7 @@ impl HeapObj {
 
     fn expr_closure(param: HeapPat, env: HashMap<HeapPtr, HeapPtr>, body: HeapPtr) -> Self {
         HeapObj {
-            tag: Tag::Closure,
+            tag: Tag::ExprClosure,
             fields: vec![],
             closure: Some(ClosureData::Expr { param, env, body }),
             var: None,
@@ -205,16 +189,26 @@ impl HeapObj {
         self.ptrs()
     }
 
+    fn unwrap_rust_closure(&self) -> (&Var, &HashMap<Var, HeapPtr>, fn(&Env, &Runtime) -> HeapPtr) {
+        let ClosureData::Rust { param, env, body } = self.closure.as_ref().unwrap() else { panic!() };
+        (param, env, *body)
+    }
+
+    fn unwrap_expr_closure(&self) -> (&HeapPat, &HashMap<HeapPtr, HeapPtr>, HeapPtr) {
+        let ClosureData::Expr { param, env, body } = self.closure.as_ref().unwrap() else { panic!() };
+        (param, env, *body)
+    }
+
     fn fmt_short(&self) -> String {
         match self.tag {
             Tag::App => format!("App({:?}, {:?})", self.ptr(0), self.ptr(1)),
             Tag::Int => format!("Int({})", self.unwrap_i32()),
             Tag::Tuple => format!("Tuple({:?})", self.ptrs()),
-            Tag::Closure => match &self.closure {
-                Some(ClosureData::Rust { param, .. }) => format!("RustClosure({})", param.0),
-                Some(ClosureData::Expr { param, body, .. }) => format!("ExprClosure({:?}, body={:?})", param, body),
-                None => "Closure(?)".to_string(),
-            },
+            Tag::RustClosure => format!("RustClosure({})", self.unwrap_rust_closure().0 .0),
+            Tag::ExprClosure => {
+                let (param, _, body) = self.unwrap_expr_closure();
+                format!("ExprClosure({:?}, body={:?})", param, body)
+            }
             Tag::Param => "Param".to_string(),
             Tag::Neutral => format!("Neutral({}, {:?})", self.var.as_ref().unwrap().0, self.ptrs()),
         }
@@ -291,18 +285,18 @@ impl Runtime {
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure.tag {
-            Tag::Closure => match closure.closure.unwrap() {
-                ClosureData::Rust { param, mut env, body } => {
-                    let None = env.insert(param.clone(), arg) else {
-                        panic!("param {:?} shadows capture", param)
-                    };
-                    (body)(&env, self)
-                }
-                ClosureData::Expr { param, mut env, body } => {
-                    self.match_pattern(&param, arg, &mut env);
-                    self.eval_code(body, &env)
-                }
-            },
+            Tag::RustClosure => {
+                let ClosureData::Rust { param, mut env, body } = closure.closure.unwrap() else { unreachable!() };
+                let None = env.insert(param.clone(), arg) else {
+                    panic!("param {:?} shadows capture", param)
+                };
+                (body)(&env, self)
+            }
+            Tag::ExprClosure => {
+                let ClosureData::Expr { param, mut env, body } = closure.closure.unwrap() else { unreachable!() };
+                self.match_pattern(&param, arg, &mut env);
+                self.eval_code(body, &env)
+            }
             Tag::Neutral => {
                 let var = closure.var.clone().unwrap();
                 let mut spine = closure.ptrs();
@@ -455,22 +449,19 @@ impl Runtime {
                 let copied: Vec<_> = elems.iter().map(|e| self.eval_code(*e, env)).collect();
                 self.heap.alloc(HeapObj::tuple(copied))
             }
-            Tag::Closure => {
-                match obj.closure.unwrap() {
-                    ClosureData::Rust { .. } => ptr, // RustClosure passes through
-                    ClosureData::Expr { param, env: cenv, body } => {
-                        assert!(cenv.is_empty(), "closure env must be empty (from to_heap)");
-                        // Capture env into closure, excluding our own params
-                        let params = param.params();
-                        let mut new_env = HashMap::new();
-                        for (&var, &val) in env {
-                            if !params.contains(&var) {
-                                new_env.insert(var, val);
-                            }
-                        }
-                        self.heap.alloc(HeapObj::expr_closure(param, new_env, body))
+            Tag::RustClosure => ptr,
+            Tag::ExprClosure => {
+                let ClosureData::Expr { param, env: cenv, body } = obj.closure.unwrap() else { unreachable!() };
+                assert!(cenv.is_empty(), "closure env must be empty (from to_heap)");
+                // Capture env into closure, excluding our own params
+                let params = param.params();
+                let mut new_env = HashMap::new();
+                for (&var, &val) in env {
+                    if !params.contains(&var) {
+                        new_env.insert(var, val);
                     }
                 }
+                self.heap.alloc(HeapObj::expr_closure(param, new_env, body))
             }
             Tag::Int | Tag::Neutral => ptr,
         }
@@ -498,21 +489,17 @@ impl Runtime {
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
         match obj.tag {
-            Tag::Closure => {
-                match obj.closure.as_ref().unwrap() {
-                    ClosureData::Rust { .. } => {
-                        let param = Var::new(format!("x{depth}"));
-                        let free_var = self.heap.alloc(HeapObj::neutral(param.clone(), vec![]));
-                        let body = self.apply(obj, free_var);
-                        Expr::lam(param, self.readback(body, depth + 1))
-                    }
-                    ClosureData::Expr { param, .. } => {
-                        // Create free variable(s) matching the pattern structure
-                        let (pat, arg, new_depth) = self.readback_pattern(param, depth);
-                        let body = self.apply(obj, arg);
-                        Expr::lam_pat(pat, self.readback(body, new_depth))
-                    }
-                }
+            Tag::RustClosure => {
+                let param = Var::new(format!("x{depth}"));
+                let free_var = self.heap.alloc(HeapObj::neutral(param.clone(), vec![]));
+                let body = self.apply(obj, free_var);
+                Expr::lam(param, self.readback(body, depth + 1))
+            }
+            Tag::ExprClosure => {
+                let (pat, _, _) = obj.unwrap_expr_closure();
+                let (expr_pat, arg, new_depth) = self.readback_pattern(pat, depth);
+                let body = self.apply(obj, arg);
+                Expr::lam_pat(expr_pat, self.readback(body, new_depth))
             }
             Tag::Neutral => {
                 let var = obj.var.clone().unwrap();
