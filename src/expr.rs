@@ -142,7 +142,7 @@ impl Expr {
     }
 
     /// Allocate Expr to heap with free variable bindings.
-    /// Bound vars get Param placeholders; free vars are resolved from env.
+    /// Bound vars get Var nodes; free vars are resolved from env.
     pub fn to_heap(&self, rt: &Runtime, env: &Env) -> HeapPtr {
         match self {
             Expr::Var(v) => env
@@ -173,14 +173,14 @@ impl Expr {
 }
 
 impl Pat {
-    /// Convert pattern to heap representation, allocating Param placeholders
+    /// Convert pattern to heap representation, allocating Var nodes
     /// and adding variable bindings to env.
     pub fn to_heap(&self, rt: &Runtime, env: &mut Env) -> HeapPat {
         match self {
             Pat::Var(v) => {
-                let param_ptr = rt.alloc(HeapObj::param());
-                env.insert(v.clone(), param_ptr);
-                HeapPat::Var(param_ptr)
+                let var_ptr = rt.alloc(HeapObj::var(v.clone()));
+                env.insert(v.clone(), var_ptr);
+                HeapPat::Var(v.clone())
             }
             Pat::Tuple(pats) => {
                 HeapPat::Tuple(pats.iter().map(|p| p.to_heap(rt, env)).collect())

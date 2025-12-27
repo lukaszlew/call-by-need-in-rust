@@ -215,7 +215,7 @@ fn captured_app_chain_not_copied(
     let heap_after_big = rt.heap_size();
 
     // Two closures: \x. \y. x  and  \a. \b. a
-    // Inner body is just a Param, not the captured value
+    // Inner body is just a Var, not the captured value
     let f = rt.run(r"\x. \y. x");
     let g = rt.run(r"\a. \b. a");
 

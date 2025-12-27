@@ -43,21 +43,21 @@ impl EnvExt for Env {
     }
 }
 
-/// Pattern on the heap. Maps to Param placeholders in the closure body.
+/// Pattern on the heap. Binds variable names.
 #[derive(Clone, Debug)]
 pub enum HeapPat {
-    /// Variable pattern - points to Param placeholder.
-    Var(HeapPtr),
+    /// Variable pattern - binds a name.
+    Var(Var),
     /// Tuple pattern.
     Tuple(Vec<HeapPat>),
 }
 
 impl HeapPat {
-    /// Collect all Param HeapPtrs in this pattern.
-    pub fn params(&self) -> Vec<HeapPtr> {
+    /// Collect all variable names bound by this pattern.
+    pub fn vars(&self) -> Vec<&Var> {
         match self {
-            HeapPat::Var(ptr) => vec![*ptr],
-            HeapPat::Tuple(pats) => pats.iter().flat_map(HeapPat::params).collect(),
+            HeapPat::Var(v) => vec![v],
+            HeapPat::Tuple(pats) => pats.iter().flat_map(HeapPat::vars).collect(),
         }
     }
 }
@@ -74,7 +74,7 @@ pub enum Tag {
     Tuple,
     RustClosure,
     ExprClosure,
-    Param,
+    Var,
     Neutral,
 }
 
@@ -111,7 +111,7 @@ pub enum ClosureData {
     },
     Expr {
         param: HeapPat,
-        env: HashMap<HeapPtr, HeapPtr>,
+        env: HashMap<Var, HeapPtr>,
         body: HeapPtr,
     },
 }
@@ -148,7 +148,7 @@ impl HeapObj {
         }
     }
 
-    fn expr_closure(param: HeapPat, env: HashMap<HeapPtr, HeapPtr>, body: HeapPtr) -> Self {
+    fn expr_closure(param: HeapPat, env: HashMap<Var, HeapPtr>, body: HeapPtr) -> Self {
         HeapObj {
             tag: Tag::ExprClosure,
             fields: vec![],
@@ -157,8 +157,8 @@ impl HeapObj {
         }
     }
 
-    fn param() -> Self {
-        HeapObj { tag: Tag::Param, fields: vec![], closure: None, var: None }
+    fn var(name: Var) -> Self {
+        HeapObj { tag: Tag::Var, fields: vec![], closure: None, var: Some(name) }
     }
 
     fn neutral(var: Var, spine: Vec<HeapPtr>) -> Self {
@@ -194,7 +194,7 @@ impl HeapObj {
         (param, env, *body)
     }
 
-    fn unwrap_expr_closure(&self) -> (&HeapPat, &HashMap<HeapPtr, HeapPtr>, HeapPtr) {
+    fn unwrap_expr_closure(&self) -> (&HeapPat, &HashMap<Var, HeapPtr>, HeapPtr) {
         let ClosureData::Expr { param, env, body } = self.closure.as_ref().unwrap() else { panic!() };
         (param, env, *body)
     }
@@ -209,7 +209,7 @@ impl HeapObj {
                 let (param, _, body) = self.unwrap_expr_closure();
                 format!("ExprClosure({:?}, body={:?})", param, body)
             }
-            Tag::Param => "Param".to_string(),
+            Tag::Var => format!("Var({})", self.var.as_ref().unwrap().0),
             Tag::Neutral => format!("Neutral({}, {:?})", self.var.as_ref().unwrap().0, self.ptrs()),
         }
     }
@@ -313,11 +313,11 @@ impl Runtime {
         &self,
         pat: &HeapPat,
         arg: HeapPtr,
-        env: &mut HashMap<HeapPtr, HeapPtr>,
+        env: &mut HashMap<Var, HeapPtr>,
     ) {
         match pat {
-            HeapPat::Var(param_ptr) => {
-                assert!(env.insert(*param_ptr, arg).is_none(), "param shadows capture");
+            HeapPat::Var(name) => {
+                assert!(env.insert(name.clone(), arg).is_none(), "param shadows capture");
             }
             HeapPat::Tuple(pats) => {
                 // Force arg to get tuple structure
@@ -432,11 +432,14 @@ impl Runtime {
     // FOAS: Term execution
     // -------------------------------------------------------------------------
 
-    /// Evaluate pre-allocated code with HeapPtr-keyed environment.
-    fn eval_code(&self, ptr: HeapPtr, env: &HashMap<HeapPtr, HeapPtr>) -> HeapPtr {
+    /// Evaluate pre-allocated code with Var-keyed environment.
+    fn eval_code(&self, ptr: HeapPtr, env: &HashMap<Var, HeapPtr>) -> HeapPtr {
         let obj = self.heap.get(ptr);
         match obj.tag {
-            Tag::Param => env[&ptr],
+            Tag::Var => {
+                let name = obj.var.as_ref().unwrap();
+                env[name]
+            }
             Tag::App => {
                 let f = obj.ptr(0);
                 let g = obj.ptr(1);
@@ -454,11 +457,11 @@ impl Runtime {
                 let ClosureData::Expr { param, env: cenv, body } = obj.closure.unwrap() else { unreachable!() };
                 assert!(cenv.is_empty(), "closure env must be empty (from to_heap)");
                 // Capture env into closure, excluding our own params
-                let params = param.params();
+                let params = param.vars();
                 let mut new_env = HashMap::new();
-                for (&var, &val) in env {
+                for (var, &val) in env {
                     if !params.contains(&var) {
-                        new_env.insert(var, val);
+                        new_env.insert(var.clone(), val);
                     }
                 }
                 self.heap.alloc(HeapObj::expr_closure(param, new_env, body))
@@ -515,7 +518,7 @@ impl Runtime {
             }
             Tag::Int => Expr::Int(obj.unwrap_i32()),
             Tag::App => panic!("unevaluated App in readback"),
-            Tag::Param => panic!("unresolved Param in readback"),
+            Tag::Var => panic!("unresolved Var in readback"),
         }
     }
 
