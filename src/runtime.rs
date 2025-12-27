@@ -70,64 +70,160 @@ impl HeapPat {
     }
 }
 
-/// Closure from parsed Expr. Uses HeapPtr-based env for efficient lookup.
-/// `param` is the pattern with Param placeholders in `body`.
-#[derive(Clone)]
-pub struct ExprClosure {
-    pub param: HeapPat,
-    pub env: HashMap<HeapPtr, HeapPtr>,
-    pub body: HeapPtr,
+// =============================================================================
+// Tagged Heap Objects (GHC-style uniform representation)
+// =============================================================================
+
+/// Object tag - discriminates heap object types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tag {
+    /// App(f, arg) - unevaluated function application
+    App,
+    /// Index(tuple, index) - unevaluated tuple indexing
+    Index,
+    /// Int value (field 0 is Int)
+    Int,
+    /// Tuple of n elements (all fields are Ptr)
+    Tuple,
+    /// Closure (has ClosureData)
+    Closure,
+    /// Parameter placeholder
+    Param,
+    /// Neutral term for readback: head applied to spine
+    Neutral,
 }
 
-// HeapObj represents unevaluated (App) or evaluated (I32, Closure, Tuple) lambda calculus terms.
-// Evaluation transmutes App into I32, Closure, or Tuple.
-//
-// https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
+/// Field in a heap object - either pointer or immediate.
+#[derive(Clone, Copy, Debug)]
+pub enum Field {
+    Ptr(HeapPtr),
+    Int(i32),
+}
+
+impl Field {
+    fn unwrap_ptr(self) -> HeapPtr {
+        match self {
+            Field::Ptr(p) => p,
+            Field::Int(_) => panic!("expected Ptr, got Int"),
+        }
+    }
+
+    fn unwrap_int(self) -> i32 {
+        match self {
+            Field::Int(n) => n,
+            Field::Ptr(_) => panic!("expected Int, got Ptr"),
+        }
+    }
+}
+
+/// Closure-specific data (only present when tag == Closure).
 #[derive(Clone)]
-pub enum HeapObj {
-    App(HeapPtr, HeapPtr),
-    I32(i32),
-    Tuple(Vec<HeapPtr>),
-    /// Tuple indexing: `tuple[index]`. Unevaluated until forced.
-    Index(HeapPtr, HeapPtr),
-    RustClosure(RustClosure),
-    ExprClosure(ExprClosure),
-    /// Parameter placeholder, resolved via HeapPtr lookup in eval_code.
-    Param,
-    ReadbackFreeVar {
-        /// `{ var: Var("x0"), spine: [a, b] }` represents `x0 a b`
-        var: Var,
-        spine: Vec<HeapPtr>,
+pub enum ClosureData {
+    Rust {
+        param: Var,
+        env: HashMap<Var, HeapPtr>,
+        body: fn(&Env, &Runtime) -> HeapPtr,
+    },
+    Expr {
+        param: HeapPat,
+        env: HashMap<HeapPtr, HeapPtr>,
+        body: HeapPtr,
     },
 }
 
+/// Heap object with uniform tagged representation.
+/// https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
+#[derive(Clone)]
+pub struct HeapObj {
+    pub tag: Tag,
+    pub fields: Vec<Field>,
+    /// Closure-specific data (only for Tag::Closure)
+    pub closure: Option<ClosureData>,
+    /// Variable name for Neutral (readback free var)
+    pub var: Option<Var>,
+}
+
 impl HeapObj {
-    fn unwrap_i32(self) -> i32 {
-        match self {
-            HeapObj::I32(n) => n,
-            _ => panic!("expected i32"),
+    // Constructors
+    fn app(f: HeapPtr, arg: HeapPtr) -> Self {
+        HeapObj { tag: Tag::App, fields: vec![Field::Ptr(f), Field::Ptr(arg)], closure: None, var: None }
+    }
+
+    fn index(tuple: HeapPtr, idx: HeapPtr) -> Self {
+        HeapObj { tag: Tag::Index, fields: vec![Field::Ptr(tuple), Field::Ptr(idx)], closure: None, var: None }
+    }
+
+    fn int(n: i32) -> Self {
+        HeapObj { tag: Tag::Int, fields: vec![Field::Int(n)], closure: None, var: None }
+    }
+
+    fn tuple(elems: Vec<HeapPtr>) -> Self {
+        HeapObj { tag: Tag::Tuple, fields: elems.into_iter().map(Field::Ptr).collect(), closure: None, var: None }
+    }
+
+    fn rust_closure(param: Var, env: HashMap<Var, HeapPtr>, body: fn(&Env, &Runtime) -> HeapPtr) -> Self {
+        HeapObj {
+            tag: Tag::Closure,
+            fields: vec![],
+            closure: Some(ClosureData::Rust { param, env, body }),
+            var: None,
         }
     }
 
-    fn unwrap_tuple(self) -> Vec<HeapPtr> {
-        match self {
-            HeapObj::Tuple(elems) => elems,
-            _ => panic!("expected tuple"),
+    fn expr_closure(param: HeapPat, env: HashMap<HeapPtr, HeapPtr>, body: HeapPtr) -> Self {
+        HeapObj {
+            tag: Tag::Closure,
+            fields: vec![],
+            closure: Some(ClosureData::Expr { param, env, body }),
+            var: None,
         }
+    }
+
+    fn param() -> Self {
+        HeapObj { tag: Tag::Param, fields: vec![], closure: None, var: None }
+    }
+
+    fn neutral(var: Var, spine: Vec<HeapPtr>) -> Self {
+        HeapObj {
+            tag: Tag::Neutral,
+            fields: spine.into_iter().map(Field::Ptr).collect(),
+            closure: None,
+            var: Some(var),
+        }
+    }
+
+    // Accessors
+    fn ptr(&self, i: usize) -> HeapPtr {
+        self.fields[i].unwrap_ptr()
+    }
+
+    fn ptrs(&self) -> Vec<HeapPtr> {
+        self.fields.iter().map(|f| f.unwrap_ptr()).collect()
+    }
+
+    fn unwrap_i32(&self) -> i32 {
+        assert!(self.tag == Tag::Int, "expected Int, got {:?}", self.tag);
+        self.fields[0].unwrap_int()
+    }
+
+    fn unwrap_tuple(&self) -> Vec<HeapPtr> {
+        assert!(self.tag == Tag::Tuple, "expected Tuple, got {:?}", self.tag);
+        self.ptrs()
     }
 
     fn fmt_short(&self) -> String {
-        match self {
-            HeapObj::App(f, x) => format!("App({:?}, {:?})", f, x),
-            HeapObj::I32(n) => format!("I32({})", n),
-            HeapObj::Tuple(elems) => format!("Tuple({:?})", elems),
-            HeapObj::Index(t, i) => format!("Index({:?}, {:?})", t, i),
-            HeapObj::RustClosure(c) => format!("RustClosure({})", c.param.0),
-            HeapObj::ExprClosure(c) => format!("ExprClosure({:?}, body={:?})", c.param, c.body),
-            HeapObj::Param => "Param".to_string(),
-            HeapObj::ReadbackFreeVar { var, spine } => {
-                format!("FreeVar({}, {:?})", var.0, spine)
-            }
+        match self.tag {
+            Tag::App => format!("App({:?}, {:?})", self.ptr(0), self.ptr(1)),
+            Tag::Index => format!("Index({:?}, {:?})", self.ptr(0), self.ptr(1)),
+            Tag::Int => format!("Int({})", self.unwrap_i32()),
+            Tag::Tuple => format!("Tuple({:?})", self.ptrs()),
+            Tag::Closure => match &self.closure {
+                Some(ClosureData::Rust { param, .. }) => format!("RustClosure({})", param.0),
+                Some(ClosureData::Expr { param, body, .. }) => format!("ExprClosure({:?}, body={:?})", param, body),
+                None => "Closure(?)".to_string(),
+            },
+            Tag::Param => "Param".to_string(),
+            Tag::Neutral => format!("Neutral({}, {:?})", self.var.as_ref().unwrap().0, self.ptrs()),
         }
     }
 }
@@ -186,10 +282,10 @@ impl Runtime {
     }
 
     /// Mutate heap object to i32. Breaks referential transparency.
-    /// Panics if the existing value is not I32.
+    /// Panics if the existing value is not Int.
     pub fn set_i32(&self, ptr: HeapPtr, val: i32) {
-        assert!(matches!(self.heap.get(ptr), HeapObj::I32(_)));
-        self.heap.update(ptr, HeapObj::I32(val));
+        assert!(self.heap.get(ptr).tag == Tag::Int);
+        self.heap.update(ptr, HeapObj::int(val));
     }
 
     fn force(&self, ptr: HeapPtr) -> HeapObj {
@@ -201,24 +297,26 @@ impl Runtime {
 
     /// Apply a function to an argument. Handles closures and neutral terms.
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
-        match closure {
-            HeapObj::RustClosure(c) => {
-                let mut env = c.env;
-                let None = env.insert(c.param.clone(), arg) else {
-                    panic!("param {:?} shadows capture", c.param)
-                };
-                (c.body)(&env, self)
-            }
-            HeapObj::ExprClosure(c) => {
-                let mut env = c.env;
-                self.match_pattern(&c.param, arg, &mut env);
-                self.eval_code(c.body, &env)
-            }
-            HeapObj::ReadbackFreeVar { var, mut spine } => {
+        match closure.tag {
+            Tag::Closure => match closure.closure.unwrap() {
+                ClosureData::Rust { param, mut env, body } => {
+                    let None = env.insert(param.clone(), arg) else {
+                        panic!("param {:?} shadows capture", param)
+                    };
+                    (body)(&env, self)
+                }
+                ClosureData::Expr { param, mut env, body } => {
+                    self.match_pattern(&param, arg, &mut env);
+                    self.eval_code(body, &env)
+                }
+            },
+            Tag::Neutral => {
+                let var = closure.var.clone().unwrap();
+                let mut spine = closure.ptrs();
                 spine.push(arg);
-                self.heap.alloc(HeapObj::ReadbackFreeVar { var, spine })
+                self.heap.alloc(HeapObj::neutral(var, spine))
             }
-            _ => panic!("expected closure"),
+            _ => panic!("expected closure, got {:?}", closure.tag),
         }
     }
 
@@ -250,21 +348,26 @@ impl Runtime {
     // Recursive version - simple but can overflow stack on deep thunk chains.
     fn force_recursive(&self, ptr: HeapPtr) -> HeapObj {
         let obj = self.heap.get(ptr);
-        match obj {
-            HeapObj::App(f, arg) => {
+        match obj.tag {
+            Tag::App => {
+                let f = obj.ptr(0);
+                let arg = obj.ptr(1);
                 let result_ptr = self.apply(self.force_recursive(f), arg);
                 let result = self.force_recursive(result_ptr);
                 self.heap.update(ptr, result.clone());
                 result
             }
-            HeapObj::Index(tuple, index) => {
+            Tag::Index => {
+                let tuple = obj.ptr(0);
+                let index = obj.ptr(1);
                 let elems = self.force_recursive(tuple).unwrap_tuple();
                 let i = self.force_recursive(index).unwrap_i32() as usize;
-                let result = self.force_recursive(elems[i]);
+                let elem_ptr = elems[i];
+                let result = self.force_recursive(elem_ptr);
                 self.heap.update(ptr, result.clone());
                 result
             }
-            v => v,
+            _ => obj,
         }
     }
 
@@ -274,43 +377,45 @@ impl Runtime {
         enum UseValueTo {
             ApplyArg(HeapPtr),
             UpdateThunk(HeapPtr),
-            /// Index into tuple with given index ptr.
-            IndexWith(HeapPtr),
-            /// Index into tuple elements with given index value.
-            IndexInto(Vec<HeapPtr>),
+            IndexWith(HeapPtr),   // index ptr
+            IndexInto(Vec<HeapPtr>), // tuple elems
         }
         let mut stack: Vec<UseValueTo> = vec![];
         let mut cached: Option<HeapObj> = None;
 
         loop {
             let obj = cached.take().unwrap_or_else(|| self.heap.get(ptr));
-            match obj {
-                HeapObj::App(f, arg) => {
+            match obj.tag {
+                Tag::App => {
+                    let f = obj.ptr(0);
+                    let arg = obj.ptr(1);
                     stack.push(UseValueTo::UpdateThunk(ptr));
                     stack.push(UseValueTo::ApplyArg(arg));
                     ptr = f;
                 }
-                HeapObj::Index(tuple, index) => {
+                Tag::Index => {
+                    let tuple = obj.ptr(0);
+                    let index = obj.ptr(1);
                     stack.push(UseValueTo::UpdateThunk(ptr));
                     stack.push(UseValueTo::IndexWith(index));
                     ptr = tuple;
                 }
-                value => match stack.pop() {
-                    None => return value,
+                _ => match stack.pop() {
+                    None => return obj,
                     Some(UseValueTo::UpdateThunk(thunk)) => {
-                        self.heap.update(thunk, value.clone());
-                        cached = Some(value);
+                        self.heap.update(thunk, obj.clone());
+                        cached = Some(obj);
                     }
                     Some(UseValueTo::ApplyArg(arg)) => {
-                        ptr = self.apply(value, arg);
+                        ptr = self.apply(obj, arg);
                     }
                     Some(UseValueTo::IndexWith(index)) => {
-                        let elems = value.unwrap_tuple();
+                        let elems = obj.unwrap_tuple();
                         stack.push(UseValueTo::IndexInto(elems));
                         ptr = index;
                     }
                     Some(UseValueTo::IndexInto(elems)) => {
-                        let i = value.unwrap_i32() as usize;
+                        let i = obj.unwrap_i32() as usize;
                         ptr = elems[i];
                     }
                 },
@@ -335,23 +440,23 @@ impl Runtime {
         env: &[(&str, HeapPtr)],
         f: fn(&Env, &Runtime) -> HeapPtr,
     ) -> HeapPtr {
-        self.heap.alloc(HeapObj::RustClosure(RustClosure {
-            param: Var::new(param),
-            env: env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
-            body: f,
-        }))
+        self.heap.alloc(HeapObj::rust_closure(
+            Var::new(param),
+            env.iter().map(|(k, v)| (Var::new(*k), *v)).collect(),
+            f,
+        ))
     }
 
     /// Create HeapPtr for i32.
     #[must_use]
     pub fn i32(&self, n: i32) -> HeapPtr {
-        self.heap.alloc(HeapObj::I32(n))
+        self.heap.alloc(HeapObj::int(n))
     }
 
     /// Allocate unevaluated lambda application.
     #[must_use]
     pub fn app(&self, f: HeapPtr, arg: HeapPtr) -> HeapPtr {
-        self.heap.alloc(HeapObj::App(f, arg))
+        self.heap.alloc(HeapObj::app(f, arg))
     }
 
     /// plus = \a.\b. a + b (primitive addition for i32)
@@ -371,34 +476,45 @@ impl Runtime {
     /// Evaluate pre-allocated code with HeapPtr-keyed environment.
     fn eval_code(&self, ptr: HeapPtr, env: &HashMap<HeapPtr, HeapPtr>) -> HeapPtr {
         let obj = self.heap.get(ptr);
-        match obj {
-            HeapObj::Param => env[&ptr],
-            HeapObj::App(f, g) => {
+        match obj.tag {
+            Tag::Param => env[&ptr],
+            Tag::App => {
+                let f = obj.ptr(0);
+                let g = obj.ptr(1);
                 let f_ptr = self.eval_code(f, env);
                 let g_ptr = self.eval_code(g, env);
                 self.app(f_ptr, g_ptr)
             }
-            HeapObj::Tuple(elems) => {
+            Tag::Tuple => {
+                let elems = obj.ptrs();
                 let copied: Vec<_> = elems.iter().map(|e| self.eval_code(*e, env)).collect();
-                self.heap.alloc(HeapObj::Tuple(copied))
+                self.heap.alloc(HeapObj::tuple(copied))
             }
-            HeapObj::Index(tuple, index) => {
+            Tag::Index => {
+                let tuple = obj.ptr(0);
+                let index = obj.ptr(1);
                 let tuple_ptr = self.eval_code(tuple, env);
                 let index_ptr = self.eval_code(index, env);
-                self.heap.alloc(HeapObj::Index(tuple_ptr, index_ptr))
+                self.heap.alloc(HeapObj::index(tuple_ptr, index_ptr))
             }
-            HeapObj::ExprClosure(mut c) => {
-                assert!(c.env.is_empty(), "closure env must be empty (from to_heap)");
-                // Capture env into closure, excluding our own params
-                let params = c.param.params();
-                for (&var, &val) in env {
-                    if !params.contains(&var) {
-                        c.env.insert(var, val);
+            Tag::Closure => {
+                match obj.closure.unwrap() {
+                    ClosureData::Rust { .. } => ptr, // RustClosure passes through
+                    ClosureData::Expr { param, env: cenv, body } => {
+                        assert!(cenv.is_empty(), "closure env must be empty (from to_heap)");
+                        // Capture env into closure, excluding our own params
+                        let params = param.params();
+                        let mut new_env = HashMap::new();
+                        for (&var, &val) in env {
+                            if !params.contains(&var) {
+                                new_env.insert(var, val);
+                            }
+                        }
+                        self.heap.alloc(HeapObj::expr_closure(param, new_env, body))
                     }
                 }
-                self.heap.alloc(HeapObj::ExprClosure(c))
             }
-            HeapObj::I32(_) | HeapObj::ReadbackFreeVar { .. } | HeapObj::RustClosure(_) => ptr,
+            Tag::Int | Tag::Neutral => ptr,
         }
     }
 
@@ -423,33 +539,39 @@ impl Runtime {
     #[must_use]
     pub fn readback(&self, ptr: HeapPtr, depth: usize) -> Expr {
         let obj = self.force(ptr);
-        match obj {
-            HeapObj::RustClosure(_) => {
-                let param = Var::new(format!("x{depth}"));
-                let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
-                    var: param.clone(),
-                    spine: vec![],
-                });
-                let body = self.apply(obj, free_var);
-                Expr::lam(param, self.readback(body, depth + 1))
+        match obj.tag {
+            Tag::Closure => {
+                match obj.closure.as_ref().unwrap() {
+                    ClosureData::Rust { .. } => {
+                        let param = Var::new(format!("x{depth}"));
+                        let free_var = self.heap.alloc(HeapObj::neutral(param.clone(), vec![]));
+                        let body = self.apply(obj, free_var);
+                        Expr::lam(param, self.readback(body, depth + 1))
+                    }
+                    ClosureData::Expr { param, .. } => {
+                        // Create free variable(s) matching the pattern structure
+                        let (pat, arg, new_depth) = self.readback_pattern(param, depth);
+                        let body = self.apply(obj, arg);
+                        Expr::lam_pat(pat, self.readback(body, new_depth))
+                    }
+                }
             }
-            HeapObj::ExprClosure(ref c) => {
-                // Create free variable(s) matching the pattern structure
-                let (pat, arg, new_depth) = self.readback_pattern(&c.param, depth);
-                let body = self.apply(obj, arg);
-                Expr::lam_pat(pat, self.readback(body, new_depth))
+            Tag::Neutral => {
+                let var = obj.var.clone().unwrap();
+                let spine = obj.ptrs();
+                Expr::app(
+                    Expr::Var(var),
+                    spine.into_iter().map(|arg| self.readback(arg, depth)).collect(),
+                )
             }
-            HeapObj::ReadbackFreeVar { var, spine } => Expr::app(
-                Expr::Var(var),
-                spine.into_iter().map(|arg| self.readback(arg, depth)).collect(),
-            ),
-            HeapObj::Tuple(elems) => {
+            Tag::Tuple => {
+                let elems = obj.ptrs();
                 Expr::Tuple(elems.into_iter().map(|e| self.readback(e, depth)).collect())
             }
-            HeapObj::I32(n) => Expr::Int(n),
-            HeapObj::App(_, _) => panic!("unevaluated App in readback"),
-            HeapObj::Index(_, _) => panic!("unevaluated Index in readback"),
-            HeapObj::Param => panic!("unresolved Param in readback"),
+            Tag::Int => Expr::Int(obj.unwrap_i32()),
+            Tag::App => panic!("unevaluated App in readback"),
+            Tag::Index => panic!("unevaluated Index in readback"),
+            Tag::Param => panic!("unresolved Param in readback"),
         }
     }
 
@@ -459,10 +581,7 @@ impl Runtime {
         match pat {
             HeapPat::Var(_) => {
                 let var = Var::new(format!("x{depth}"));
-                let free_var = self.heap.alloc(HeapObj::ReadbackFreeVar {
-                    var: var.clone(),
-                    spine: vec![],
-                });
+                let free_var = self.heap.alloc(HeapObj::neutral(var.clone(), vec![]));
                 (Pat::Var(var), free_var, depth + 1)
             }
             HeapPat::Tuple(pats) => {
@@ -475,7 +594,7 @@ impl Runtime {
                     heap_args.push(heap_arg);
                     new_depth = d;
                 }
-                let tuple = self.heap.alloc(HeapObj::Tuple(heap_args));
+                let tuple = self.heap.alloc(HeapObj::tuple(heap_args));
                 (Pat::Tuple(expr_pats), tuple, new_depth)
             }
         }

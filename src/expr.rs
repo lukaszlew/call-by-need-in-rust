@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-pub use super::{Env, ExprClosure, HeapObj, HeapPat, HeapPtr, Runtime, Var};
+pub use super::{Env, HeapObj, HeapPat, HeapPtr, Runtime, Var};
 
 /// Pattern for lambda parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,20 +175,16 @@ impl Expr {
                 let mut env = env.clone();
                 let heap_pat = param.to_heap(rt, &mut env);
                 let body_ptr = body.to_heap(rt, &env);
-                rt.alloc(HeapObj::ExprClosure(ExprClosure {
-                    param: heap_pat,
-                    env: HashMap::new(),
-                    body: body_ptr,
-                }))
+                rt.alloc(HeapObj::expr_closure(heap_pat, HashMap::new(), body_ptr))
             }
             Expr::Tuple(elems) => {
                 let ptrs: Vec<_> = elems.iter().map(|e| e.to_heap(rt, env)).collect();
-                rt.alloc(HeapObj::Tuple(ptrs))
+                rt.alloc(HeapObj::tuple(ptrs))
             }
             Expr::Index { tuple, index } => {
                 let tuple_ptr = tuple.to_heap(rt, env);
                 let index_ptr = index.to_heap(rt, env);
-                rt.alloc(HeapObj::Index(tuple_ptr, index_ptr))
+                rt.alloc(HeapObj::index(tuple_ptr, index_ptr))
             }
             Expr::Plus => rt.plus(),
         }
@@ -201,7 +197,7 @@ impl Pat {
     pub fn to_heap(&self, rt: &Runtime, env: &mut Env) -> HeapPat {
         match self {
             Pat::Var(v) => {
-                let param_ptr = rt.alloc(HeapObj::Param);
+                let param_ptr = rt.alloc(HeapObj::param());
                 env.insert(v.clone(), param_ptr);
                 HeapPat::Var(param_ptr)
             }
