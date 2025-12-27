@@ -191,9 +191,9 @@ fn nbe_equality_tests(#[values(ForceMode::Recursive, ForceMode::Iterative)] mode
     let stats = run_equality_tests(content, mode).unwrap();
     assert_eq!(stats, TestStats {
         bindings: 51,
-        tests: 126,
-        heap_size: 3344,
-        heap_stats: HeapStats { allocs: 3344, reads: 4503, writes: 714 },
+        tests: 148,
+        heap_size: 3584,
+        heap_stats: HeapStats { allocs: 3584, reads: 4686, writes: 755 },
     });
 }
 

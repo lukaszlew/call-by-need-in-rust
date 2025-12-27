@@ -61,6 +61,14 @@ impl<T: Clone> Heap<T> {
         self.writes.set(self.writes.get() + 1);
         self.objects.borrow_mut()[ptr.0] = obj;
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (HeapPtr, T)> + '_ {
+        let objects = self.objects.borrow();
+        (0..objects.len())
+            .map(|i| (HeapPtr(i), objects[i].clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 }
 
 impl<T: Clone> Default for Heap<T> {

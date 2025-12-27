@@ -77,8 +77,23 @@ fn expr() -> impl Parser<char, Expr, Error = Simple<char>> {
 
         let atom = lambda.or(paren_or_tuple).or(int).or(plus).or(var);
 
-        atom.clone()
-            .then(atom.repeated())
+        // Handle postfix indexing: atom[i][j]...
+        let index_suffix = expr
+            .clone()
+            .delimited_by(just('[').padded(), just(']').padded());
+        let indexed = atom
+            .clone()
+            .then(index_suffix.repeated())
+            .map(|(base, indices)| {
+                indices.into_iter().fold(base, |tuple, index| Expr::Index {
+                    tuple: Box::new(tuple),
+                    index: Box::new(index),
+                })
+            });
+
+        indexed
+            .clone()
+            .then(indexed.repeated())
             .map(|(head, spine)| Expr::app(head, spine))
     })
     .padded()
@@ -219,6 +234,60 @@ mod tests {
                 ]),
                 Expr::Var("y".into())
             )
+        );
+    }
+
+    #[test]
+    fn parse_index() {
+        // t[0]
+        assert_eq!(
+            parse("t[0]"),
+            Expr::Index {
+                tuple: Box::new(Expr::Var("t".into())),
+                index: Box::new(Expr::Int(0)),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_chained_index() {
+        // t[0][1]
+        assert_eq!(
+            parse("t[0][1]"),
+            Expr::Index {
+                tuple: Box::new(Expr::Index {
+                    tuple: Box::new(Expr::Var("t".into())),
+                    index: Box::new(Expr::Int(0)),
+                }),
+                index: Box::new(Expr::Int(1)),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_tuple_index() {
+        // (1, 2)[0]
+        assert_eq!(
+            parse("(1, 2)[0]"),
+            Expr::Index {
+                tuple: Box::new(Expr::Tuple(vec![Expr::Int(1), Expr::Int(2)])),
+                index: Box::new(Expr::Int(0)),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_index_expr() {
+        // t[+ 0 1]
+        assert_eq!(
+            parse("t[+ 0 1]"),
+            Expr::Index {
+                tuple: Box::new(Expr::Var("t".into())),
+                index: Box::new(Expr::App {
+                    head: Box::new(Expr::Plus),
+                    spine: vec![Expr::Int(0), Expr::Int(1)],
+                }),
+            }
         );
     }
 }

@@ -88,6 +88,8 @@ pub enum HeapObj {
     App(HeapPtr, HeapPtr),
     I32(i32),
     Tuple(Vec<HeapPtr>),
+    /// Tuple indexing: `tuple[index]`. Unevaluated until forced.
+    Index(HeapPtr, HeapPtr),
     RustClosure(RustClosure),
     ExprClosure(ExprClosure),
     /// Parameter placeholder, resolved via HeapPtr lookup in eval_code.
@@ -111,6 +113,21 @@ impl HeapObj {
         match self {
             HeapObj::Tuple(elems) => elems,
             _ => panic!("expected tuple"),
+        }
+    }
+
+    fn fmt_short(&self) -> String {
+        match self {
+            HeapObj::App(f, x) => format!("App({:?}, {:?})", f, x),
+            HeapObj::I32(n) => format!("I32({})", n),
+            HeapObj::Tuple(elems) => format!("Tuple({:?})", elems),
+            HeapObj::Index(t, i) => format!("Index({:?}, {:?})", t, i),
+            HeapObj::RustClosure(c) => format!("RustClosure({})", c.param.0),
+            HeapObj::ExprClosure(c) => format!("ExprClosure({:?}, body={:?})", c.param, c.body),
+            HeapObj::Param => "Param".to_string(),
+            HeapObj::ReadbackFreeVar { var, spine } => {
+                format!("FreeVar({}, {:?})", var.0, spine)
+            }
         }
     }
 }
@@ -153,6 +170,13 @@ impl Runtime {
     #[must_use]
     pub fn stats(&self) -> HeapStats {
         self.heap.stats()
+    }
+
+    /// Dump all heap objects for debugging.
+    pub fn dump_heap(&self) {
+        for (ptr, obj) in self.heap.iter() {
+            println!("{:?}: {}", ptr, obj.fmt_short());
+        }
     }
 
     /// Force and extract i32.
@@ -233,6 +257,13 @@ impl Runtime {
                 self.heap.update(ptr, result.clone());
                 result
             }
+            HeapObj::Index(tuple, index) => {
+                let elems = self.force_recursive(tuple).unwrap_tuple();
+                let i = self.force_recursive(index).unwrap_i32() as usize;
+                let result = self.force_recursive(elems[i]);
+                self.heap.update(ptr, result.clone());
+                result
+            }
             v => v,
         }
     }
@@ -243,6 +274,10 @@ impl Runtime {
         enum UseValueTo {
             ApplyArg(HeapPtr),
             UpdateThunk(HeapPtr),
+            /// Index into tuple with given index ptr.
+            IndexWith(HeapPtr),
+            /// Index into tuple elements with given index value.
+            IndexInto(Vec<HeapPtr>),
         }
         let mut stack: Vec<UseValueTo> = vec![];
         let mut cached: Option<HeapObj> = None;
@@ -255,6 +290,11 @@ impl Runtime {
                     stack.push(UseValueTo::ApplyArg(arg));
                     ptr = f;
                 }
+                HeapObj::Index(tuple, index) => {
+                    stack.push(UseValueTo::UpdateThunk(ptr));
+                    stack.push(UseValueTo::IndexWith(index));
+                    ptr = tuple;
+                }
                 value => match stack.pop() {
                     None => return value,
                     Some(UseValueTo::UpdateThunk(thunk)) => {
@@ -263,6 +303,15 @@ impl Runtime {
                     }
                     Some(UseValueTo::ApplyArg(arg)) => {
                         ptr = self.apply(value, arg);
+                    }
+                    Some(UseValueTo::IndexWith(index)) => {
+                        let elems = value.unwrap_tuple();
+                        stack.push(UseValueTo::IndexInto(elems));
+                        ptr = index;
+                    }
+                    Some(UseValueTo::IndexInto(elems)) => {
+                        let i = value.unwrap_i32() as usize;
+                        ptr = elems[i];
                     }
                 },
             }
@@ -333,6 +382,11 @@ impl Runtime {
                 let copied: Vec<_> = elems.iter().map(|e| self.eval_code(*e, env)).collect();
                 self.heap.alloc(HeapObj::Tuple(copied))
             }
+            HeapObj::Index(tuple, index) => {
+                let tuple_ptr = self.eval_code(tuple, env);
+                let index_ptr = self.eval_code(index, env);
+                self.heap.alloc(HeapObj::Index(tuple_ptr, index_ptr))
+            }
             HeapObj::ExprClosure(mut c) => {
                 assert!(c.env.is_empty(), "closure env must be empty (from to_heap)");
                 // Capture env into closure, excluding our own params
@@ -394,6 +448,7 @@ impl Runtime {
             }
             HeapObj::I32(n) => Expr::Int(n),
             HeapObj::App(_, _) => panic!("unevaluated App in readback"),
+            HeapObj::Index(_, _) => panic!("unevaluated Index in readback"),
             HeapObj::Param => panic!("unresolved Param in readback"),
         }
     }
