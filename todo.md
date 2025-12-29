@@ -1,3 +1,7 @@
+How can we put neutral terms in NbE in sharing graphs?
+- write logic of neutral terms.
+  - (N[spine] t) -> N[spine,t] - when applied to, just enlarge the environment.
+  - \x.body -> \N.readback((t[x/N]))  when hitting into closure t, allocate new neutral var v and continue with
 Goal:
 - compare to sharing graph, esp copying.
 - have more tests that have a BIG term

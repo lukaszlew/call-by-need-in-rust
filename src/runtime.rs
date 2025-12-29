@@ -1,6 +1,7 @@
 pub mod expr;
 pub mod expr_parser;
 pub mod heap;
+pub mod inet;
 
 #[cfg(test)]
 mod common;
