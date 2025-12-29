@@ -342,12 +342,20 @@ fn connect_param(
                     uses: uses.len(),
                 });
             }
-            let tag = Tag { raw: RawTag::TFun, sub: SubTag::Arg, polarity: Polarity::Constructor };
+            let tag = Tag {
+                raw: RawTag::TFun,
+                sub: SubTag::Arg,
+                polarity: Polarity::Constructor,
+            };
             graph.add_edge(uses[0], fun_nid, tag);
         }
         FunMode::WithDup => {
             let dup_nid = graph.alloc_vertex();
-            let tag = Tag { raw: RawTag::TFun, sub: SubTag::Arg, polarity: Polarity::Constructor };
+            let tag = Tag {
+                raw: RawTag::TFun,
+                sub: SubTag::Arg,
+                polarity: Polarity::Constructor,
+            };
             graph.add_edge(dup_nid, fun_nid, tag);
             for (i, use_v) in uses.into_iter().enumerate() {
                 let tag = Tag {
@@ -381,7 +389,11 @@ fn translate(
             let (body_nid, mut body_env) = translate(body, graph, mode)?;
             let fun_nid = graph.alloc_vertex();
             let uses = env_remove(&mut body_env, &VarName(param_var.0.clone()));
-            let tag = Tag { raw: RawTag::TFun, sub: SubTag::Ret, polarity: Polarity::Constructor };
+            let tag = Tag {
+                raw: RawTag::TFun,
+                sub: SubTag::Ret,
+                polarity: Polarity::Constructor,
+            };
             graph.add_edge(body_nid, fun_nid, tag);
             connect_param(graph, fun_nid, &param_var.0, uses, mode)?;
             Ok((fun_nid, body_env))
@@ -391,8 +403,16 @@ fn translate(
             for arg in spine {
                 let (arg_nid, arg_env) = translate(arg, graph, mode)?;
                 let app_nid = graph.alloc_vertex();
-                let arg_tag = Tag { raw: RawTag::TFun, sub: SubTag::Arg, polarity: Polarity::Destructor };
-                let ret_tag = Tag { raw: RawTag::TFun, sub: SubTag::Ret, polarity: Polarity::Destructor };
+                let arg_tag = Tag {
+                    raw: RawTag::TFun,
+                    sub: SubTag::Arg,
+                    polarity: Polarity::Destructor,
+                };
+                let ret_tag = Tag {
+                    raw: RawTag::TFun,
+                    sub: SubTag::Ret,
+                    polarity: Polarity::Destructor,
+                };
                 graph.add_edge(arg_nid, curr_nid, arg_tag);
                 graph.add_edge(app_nid, curr_nid, ret_tag);
                 env = merge_env(env, arg_env);
@@ -405,7 +425,11 @@ fn translate(
             let mut env = HashMap::new();
             for (i, elem) in elems.iter().enumerate() {
                 let (elem_nid, elem_env) = translate(elem, graph, mode)?;
-                let tag = Tag { raw: RawTag::TPair, sub: SubTag::TupI(i), polarity: Polarity::Constructor };
+                let tag = Tag {
+                    raw: RawTag::TPair,
+                    sub: SubTag::TupI(i),
+                    polarity: Polarity::Constructor,
+                };
                 graph.add_edge(elem_nid, tuple_nid, tag);
                 env = merge_env(env, elem_env);
             }
@@ -421,5 +445,60 @@ fn translate(
 pub fn run_translate(expr: &Expr, mode: FunMode) -> Result<SharingGraph, TranslateError> {
     let mut graph = Graph::new();
     let (root, env) = translate(expr, &mut graph, mode)?;
-    Ok(SharingGraph { graph, root, free_vars: env })
+    Ok(SharingGraph {
+        graph,
+        root,
+        free_vars: env,
+    })
 }
+
+// envRemove :: Env -> VarName -> ([VertexId], Env)
+// envRemove env param = (Map.findWithDefault [] param env, Map.delete param env)
+
+// mergeEnv :: Env -> Env -> Env
+// mergeEnv = Map.unionWith (++)
+
+// translate :: Term -> Graph Tag -> (VertexId, Env, Graph Tag)
+// translate term g0 = case term of
+//   Var x ->
+//     let (nid, g1) = allocVertex g0
+//      in (nid, Map.singleton (VarName x) [nid], g1)
+//   Fun mode param body ->
+//     let (bodyNid, bodyEnv, g1) = translate body g0
+//         (funNid, g2) = allocVertex g1
+//         (uses, env') = envRemove bodyEnv (VarName param)
+//         g3 = addEdge bodyNid funNid (Tag TFun Ret Constructor) g2
+//         g4 = connectParam funNid param uses mode g3
+//      in (funNid, env', g4)
+//   App f a ->
+//     let (funNid, env1, g1) = translate f g0
+//         (argNid, env2, g2) = translate a g1
+//         (appNid, g3) = allocVertex g2
+//         g4 = addEdge argNid funNid (Tag TFun Arg Destructor) g3
+//         g5 = addEdge appNid funNid (Tag TFun Ret Destructor) g4
+//      in (appNid, mergeEnv env1 env2, g5)
+//   Pair a b ->
+//     let (aNid, env1, g1) = translate a g0
+//         (bNid, env2, g2) = translate b g1
+//         (pairNid, g3) = allocVertex g2
+//         g4 = addEdge aNid pairNid (Tag TPair Fst Constructor) g3
+//         g5 = addEdge bNid pairNid (Tag TPair Snd Constructor) g4
+//      in (pairNid, mergeEnv env1 env2, g5)
+//   Data _ ->
+//     let (nid, g1) = allocVertex g0
+//      in (nid, Map.empty, g1)
+
+// connectParam :: VertexId -> String -> [VertexId] -> FunMode -> Graph Tag -> Graph Tag
+// connectParam funNid param uses mode g = case mode of
+//   Linear -> case uses of
+//     [use] -> addEdge use funNid (Tag TFun Arg Constructor) g
+//     _ -> error $ "Linear param " ++ param ++ " must be used exactly once, got " ++ show (length uses)
+//   WithDup ->
+//     let (dupNid, g1) = allocVertex g
+//         g2 = addEdge dupNid funNid (Tag TFun Arg Constructor) g1
+//      in foldr (\(i, use) -> addEdge use dupNid (Tag (TDup param) (DupI i) Destructor)) g2 (zip [0 ..] uses)
+
+// runTranslate :: Term -> SharingGraph
+// runTranslate term =
+//   let (rootV, env, g) = translate term emptyGraph
+//    in SharingGraph { graph = g, root = rootV, freeVars = env }
