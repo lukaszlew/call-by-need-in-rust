@@ -1,75 +1,98 @@
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct VertexId(usize);
+pub struct NodeId(usize);
+
+/// A port connection: (Tag, target NodeId)
+/// The Tag is stored on the port/edge, not derived from the node.
+pub type Port = (Tag, NodeId);
 
 #[derive(Clone, Debug)]
-pub struct Edge<T> {
-    pub src: VertexId,
-    pub dst: VertexId,
-    pub tag: T,
+pub struct Node {
+    pub ports: Vec<Port>, // outgoing connections with their tags
 }
 
 #[derive(Clone, Debug)]
-pub struct Graph<T> {
-    next_id: usize,
-    edges: Vec<Edge<T>>,
+pub struct Graph {
+    nodes: Vec<Option<Node>>, // indexed by NodeId, None = deleted
 }
 
-impl<T: Clone> Graph<T> {
+impl Graph {
     pub fn new() -> Self {
-        Graph {
-            next_id: 0,
-            edges: Vec::new(),
-        }
+        Graph { nodes: Vec::new() }
     }
 
-    pub fn alloc_vertex(&mut self) -> VertexId {
-        let id = VertexId(self.next_id);
-        self.next_id += 1;
+    pub fn alloc(&mut self, node: Node) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Some(node));
         id
     }
 
-    pub fn add_edge(&mut self, src: VertexId, dst: VertexId, tag: T) {
-        self.edges.push(Edge { src, dst, tag });
+    pub fn alloc_empty(&mut self) -> NodeId {
+        self.alloc(Node { ports: Vec::new() })
     }
 
-    pub fn get_outgoing(&self, vertex: VertexId) -> Vec<(T, VertexId)> {
-        self.edges
-            .iter()
-            .filter(|e| e.src == vertex)
-            .map(|e| (e.tag.clone(), e.dst))
-            .collect()
+    pub fn get(&self, id: NodeId) -> Option<&Node> {
+        self.nodes.get(id.0).and_then(|n| n.as_ref())
     }
 
-    pub fn get_incoming(&self, vertex: VertexId) -> Vec<(VertexId, T)> {
-        self.edges
-            .iter()
-            .filter(|e| e.dst == vertex)
-            .map(|e| (e.src, e.tag.clone()))
-            .collect()
+    pub fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(id.0).and_then(|n| n.as_mut())
     }
 
-    pub fn remove_vertex(&mut self, vertex: VertexId) {
-        self.edges.retain(|e| e.src != vertex && e.dst != vertex);
+    pub fn add_port(&mut self, from: NodeId, tag: Tag, to: NodeId) {
+        if let Some(node) = self.get_mut(from) {
+            node.ports.push((tag, to));
+        }
     }
 
-    pub fn merge_vertices(&mut self, old: VertexId, new: VertexId) {
-        for e in &mut self.edges {
-            if e.src == old {
-                e.src = new;
+    pub fn get_outgoing(&self, id: NodeId) -> Vec<(Tag, NodeId)> {
+        self.get(id)
+            .map(|node| node.ports.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn get_incoming(&self, id: NodeId) -> Vec<(NodeId, Tag)> {
+        let mut incoming = Vec::new();
+        for (i, node_opt) in self.nodes.iter().enumerate() {
+            if let Some(node) = node_opt {
+                for (tag, target) in &node.ports {
+                    if *target == id {
+                        incoming.push((NodeId(i), tag.clone()));
+                    }
+                }
             }
-            if e.dst == old {
-                e.dst = new;
+        }
+        incoming
+    }
+
+    pub fn remove_node(&mut self, id: NodeId) {
+        if let Some(slot) = self.nodes.get_mut(id.0) {
+            *slot = None;
+        }
+        for node_opt in &mut self.nodes {
+            if let Some(node) = node_opt {
+                node.ports.retain(|(_, target)| *target != id);
             }
         }
     }
 
-    pub fn alloc_vertex2(&mut self, (t1, v1): (T, VertexId), (t2, v2): (T, VertexId)) -> VertexId {
-        let new_v = self.alloc_vertex();
-        self.add_edge(new_v, v1, t1);
-        self.add_edge(new_v, v2, t2);
-        new_v
+    pub fn merge_nodes(&mut self, old: NodeId, new: NodeId) {
+        for node_opt in &mut self.nodes {
+            if let Some(node) = node_opt {
+                for (_, target) in &mut node.ports {
+                    if *target == old {
+                        *target = new;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn alloc_with_ports(&mut self, p1: (Tag, NodeId), p2: (Tag, NodeId)) -> NodeId {
+        self.alloc(Node {
+            ports: vec![p1, p2],
+        })
     }
 }
 
@@ -162,14 +185,14 @@ pub struct VarName(pub String);
 
 #[derive(Clone, Debug)]
 pub struct SharingGraph {
-    pub graph: Graph<Tag>,
-    pub root: VertexId,
-    pub free_vars: HashMap<VarName, Vec<VertexId>>,
+    pub graph: Graph,
+    pub root: NodeId,
+    pub free_vars: HashMap<VarName, Vec<NodeId>>,
 }
 
-pub type Remap = Vec<(VertexId, VertexId)>;
+pub type Remap = Vec<(NodeId, NodeId)>;
 
-fn apply_remap(remap: &Remap, v: VertexId) -> VertexId {
+fn apply_remap(remap: &Remap, v: NodeId) -> NodeId {
     remap
         .iter()
         .find(|(old, _)| *old == v)
@@ -185,13 +208,13 @@ pub enum INetError {
 }
 
 impl SharingGraph {
-    pub fn merge_vertices(&mut self, old: VertexId, new: VertexId) {
-        self.graph.merge_vertices(old, new);
+    pub fn merge_nodes(&mut self, old: NodeId, new: NodeId) {
+        self.graph.merge_nodes(old, new);
         if self.root == old {
             self.root = new;
         }
-        for vertices in self.free_vars.values_mut() {
-            for v in vertices.iter_mut() {
+        for nodes in self.free_vars.values_mut() {
+            for v in nodes.iter_mut() {
                 if *v == old {
                     *v = new;
                 }
@@ -199,22 +222,18 @@ impl SharingGraph {
         }
     }
 
-    pub fn protected_vertices(&self) -> Vec<VertexId> {
+    pub fn protected_nodes(&self) -> Vec<NodeId> {
         let mut protected = vec![self.root];
-        for vertices in self.free_vars.values() {
-            protected.extend(vertices);
+        for nodes in self.free_vars.values() {
+            protected.extend(nodes);
         }
         protected
     }
 
-    pub fn is_protected(&self, v: VertexId) -> bool {
-        self.protected_vertices().contains(&v)
-    }
-
-    pub fn eliminate_cut(&mut self, v: VertexId) -> Result<Remap, INetError> {
+    pub fn eliminate_cut(&mut self, v: NodeId) -> Result<Remap, INetError> {
         let incoming = self.graph.get_incoming(v);
         let pairs = all_pairs(&incoming);
-        self.graph.remove_vertex(v);
+        self.graph.remove_node(v);
 
         let mut remap: Remap = Vec::new();
         for ((v1, t1), (v2, t2)) in pairs {
@@ -223,11 +242,11 @@ impl SharingGraph {
             match t1.relation(&t2) {
                 Interaction::Ignore => {}
                 Interaction::Annihilate => {
-                    self.merge_vertices(v2, v1);
+                    self.merge_nodes(v2, v1);
                     remap.push((v2, v1));
                 }
                 Interaction::Commute => {
-                    self.graph.alloc_vertex2((t2, v1), (t1, v2));
+                    self.graph.alloc_with_ports((t2, v1), (t1, v2));
                 }
                 Interaction::Stuck => return Err(INetError::Stuck(t1, t2)),
             }
@@ -237,8 +256,8 @@ impl SharingGraph {
 
     pub fn eval(
         &mut self,
-        protected: &mut Vec<VertexId>,
-        curr: VertexId,
+        protected: &mut Vec<NodeId>,
+        curr: NodeId,
         fuel: usize,
     ) -> Result<(Remap, bool), INetError> {
         if fuel == 0 {
@@ -274,7 +293,7 @@ impl SharingGraph {
     }
 
     pub fn whnf(&mut self) -> Result<(), INetError> {
-        let mut protected = self.protected_vertices();
+        let mut protected = self.protected_nodes();
         let root = self.root;
         self.eval(&mut protected, root, 10000)?;
         Ok(())
@@ -282,13 +301,13 @@ impl SharingGraph {
 
     pub fn nf(&mut self) -> Result<(), INetError> {
         self.whnf()?;
-        let incoming: Vec<VertexId> = self
+        let incoming: Vec<NodeId> = self
             .graph
             .get_incoming(self.root)
             .into_iter()
             .map(|(v, _)| v)
             .collect();
-        let mut protected = self.protected_vertices();
+        let mut protected = self.protected_nodes();
         protected.extend(&incoming);
 
         for v in incoming {
@@ -302,9 +321,9 @@ impl SharingGraph {
 
 use crate::expr::{Expr, FunMode, Pat};
 
-type TranslateEnv = HashMap<VarName, Vec<VertexId>>;
+type TranslateEnv = HashMap<VarName, Vec<NodeId>>;
 
-fn env_remove(env: &mut TranslateEnv, param: &VarName) -> Vec<VertexId> {
+fn env_remove(env: &mut TranslateEnv, param: &VarName) -> Vec<NodeId> {
     env.remove(param).unwrap_or_default()
 }
 
@@ -322,12 +341,17 @@ pub enum TranslateError {
 }
 
 fn connect_param(
-    graph: &mut Graph<Tag>,
-    fun_nid: VertexId,
+    graph: &mut Graph,
+    fun_nid: NodeId,
     param: &str,
-    uses: Vec<VertexId>,
+    uses: Vec<NodeId>,
     mode: FunMode,
 ) -> Result<(), TranslateError> {
+    let arg_tag = Tag {
+        raw: RawTag::TFun,
+        sub: SubTag::Arg,
+        polarity: Polarity::Constructor,
+    };
     match mode {
         FunMode::Linear => {
             if uses.len() != 1 {
@@ -336,28 +360,19 @@ fn connect_param(
                     uses: uses.len(),
                 });
             }
-            let tag = Tag {
-                raw: RawTag::TFun,
-                sub: SubTag::Arg,
-                polarity: Polarity::Constructor,
-            };
-            graph.add_edge(uses[0], fun_nid, tag);
+            graph.add_port(uses[0], arg_tag, fun_nid);
         }
         FunMode::WithDup => {
-            let dup_nid = graph.alloc_vertex();
-            let tag = Tag {
-                raw: RawTag::TFun,
-                sub: SubTag::Arg,
-                polarity: Polarity::Constructor,
-            };
-            graph.add_edge(dup_nid, fun_nid, tag);
+            let dup_nid = graph.alloc(Node {
+                ports: vec![(arg_tag, fun_nid)],
+            });
             for (i, use_v) in uses.into_iter().enumerate() {
-                let tag = Tag {
+                let dup_tag = Tag {
                     raw: RawTag::TDup(param.to_string()),
                     sub: SubTag::DupI(i),
                     polarity: Polarity::Destructor,
                 };
-                graph.add_edge(use_v, dup_nid, tag);
+                graph.add_port(use_v, dup_tag, dup_nid);
             }
         }
     }
@@ -366,11 +381,11 @@ fn connect_param(
 
 fn translate(
     expr: &Expr,
-    graph: &mut Graph<Tag>,
-) -> Result<(VertexId, TranslateEnv), TranslateError> {
+    graph: &mut Graph,
+) -> Result<(NodeId, TranslateEnv), TranslateError> {
     match expr {
         Expr::Var(v) => {
-            let nid = graph.alloc_vertex();
+            let nid = graph.alloc_empty();
             let mut env = HashMap::new();
             env.insert(VarName(v.0.clone()), vec![nid]);
             Ok((nid, env))
@@ -380,14 +395,14 @@ fn translate(
                 return Err(TranslateError::ExpectedVarPattern);
             };
             let (body_nid, mut body_env) = translate(body, graph)?;
-            let fun_nid = graph.alloc_vertex();
             let uses = env_remove(&mut body_env, &VarName(param_var.0.clone()));
-            let tag = Tag {
+            let fun_nid = graph.alloc_empty();
+            let ret_tag = Tag {
                 raw: RawTag::TFun,
                 sub: SubTag::Ret,
                 polarity: Polarity::Constructor,
             };
-            graph.add_edge(body_nid, fun_nid, tag);
+            graph.add_port(body_nid, ret_tag, fun_nid);
             connect_param(graph, fun_nid, &param_var.0, uses, *mode)?;
             Ok((fun_nid, body_env))
         }
@@ -395,41 +410,42 @@ fn translate(
             let (mut curr_nid, mut env) = translate(head, graph)?;
             for arg in spine {
                 let (arg_nid, arg_env) = translate(arg, graph)?;
-                let app_nid = graph.alloc_vertex();
-                let arg_tag = Tag {
-                    raw: RawTag::TFun,
-                    sub: SubTag::Arg,
-                    polarity: Polarity::Destructor,
-                };
                 let ret_tag = Tag {
                     raw: RawTag::TFun,
                     sub: SubTag::Ret,
                     polarity: Polarity::Destructor,
                 };
-                graph.add_edge(arg_nid, curr_nid, arg_tag);
-                graph.add_edge(app_nid, curr_nid, ret_tag);
+                let arg_tag = Tag {
+                    raw: RawTag::TFun,
+                    sub: SubTag::Arg,
+                    polarity: Polarity::Destructor,
+                };
+                let app_nid = graph.alloc(Node {
+                    ports: vec![(ret_tag, curr_nid)],
+                });
+                graph.add_port(arg_nid, arg_tag, curr_nid);
                 env = merge_env(env, arg_env);
                 curr_nid = app_nid;
             }
             Ok((curr_nid, env))
         }
         Expr::Tuple(elems) => {
-            let tuple_nid = graph.alloc_vertex();
+            let tuple_nid = graph.alloc_empty();
             let mut env = HashMap::new();
             for (i, elem) in elems.iter().enumerate() {
                 let (elem_nid, elem_env) = translate(elem, graph)?;
-                let tag = Tag {
+                let tup_tag = Tag {
                     raw: RawTag::TPair,
                     sub: SubTag::TupI(i),
                     polarity: Polarity::Constructor,
                 };
-                graph.add_edge(elem_nid, tuple_nid, tag);
+                graph.add_port(elem_nid, tup_tag, tuple_nid);
                 env = merge_env(env, elem_env);
             }
             Ok((tuple_nid, env))
         }
         Expr::Int(_) | Expr::Plus => {
-            let nid = graph.alloc_vertex();
+            let nid = graph.alloc_empty();
             Ok((nid, HashMap::new()))
         }
     }
