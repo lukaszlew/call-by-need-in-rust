@@ -128,18 +128,37 @@ pub struct HeapObj {
 impl HeapObj {
     // Constructors
     fn app(f: HeapPtr, arg: HeapPtr) -> Self {
-        HeapObj { tag: Tag::App, fields: vec![Field::Ptr(f), Field::Ptr(arg)], closure: None, var: None }
+        HeapObj {
+            tag: Tag::App,
+            fields: vec![Field::Ptr(f), Field::Ptr(arg)],
+            closure: None,
+            var: None,
+        }
     }
 
     fn int(n: i32) -> Self {
-        HeapObj { tag: Tag::Int, fields: vec![Field::Int(n)], closure: None, var: None }
+        HeapObj {
+            tag: Tag::Int,
+            fields: vec![Field::Int(n)],
+            closure: None,
+            var: None,
+        }
     }
 
     fn tuple(elems: Vec<HeapPtr>) -> Self {
-        HeapObj { tag: Tag::Tuple, fields: elems.into_iter().map(Field::Ptr).collect(), closure: None, var: None }
+        HeapObj {
+            tag: Tag::Tuple,
+            fields: elems.into_iter().map(Field::Ptr).collect(),
+            closure: None,
+            var: None,
+        }
     }
 
-    fn rust_closure(param: Var, env: HashMap<Var, HeapPtr>, body: fn(&Env, &Runtime) -> HeapPtr) -> Self {
+    fn rust_closure(
+        param: Var,
+        env: HashMap<Var, HeapPtr>,
+        body: fn(&Env, &Runtime) -> HeapPtr,
+    ) -> Self {
         HeapObj {
             tag: Tag::RustClosure,
             fields: vec![],
@@ -158,7 +177,12 @@ impl HeapObj {
     }
 
     fn var(name: Var) -> Self {
-        HeapObj { tag: Tag::Var, fields: vec![], closure: None, var: Some(name) }
+        HeapObj {
+            tag: Tag::Var,
+            fields: vec![],
+            closure: None,
+            var: Some(name),
+        }
     }
 
     fn neutral(var: Var, spine: Vec<HeapPtr>) -> Self {
@@ -190,12 +214,16 @@ impl HeapObj {
     }
 
     fn unwrap_rust_closure(&self) -> (&Var, &HashMap<Var, HeapPtr>, fn(&Env, &Runtime) -> HeapPtr) {
-        let ClosureData::Rust { param, env, body } = self.closure.as_ref().unwrap() else { panic!() };
+        let ClosureData::Rust { param, env, body } = self.closure.as_ref().unwrap() else {
+            panic!()
+        };
         (param, env, *body)
     }
 
     fn unwrap_expr_closure(&self) -> (&HeapPat, &HashMap<Var, HeapPtr>, HeapPtr) {
-        let ClosureData::Expr { param, env, body } = self.closure.as_ref().unwrap() else { panic!() };
+        let ClosureData::Expr { param, env, body } = self.closure.as_ref().unwrap() else {
+            panic!()
+        };
         (param, env, *body)
     }
 
@@ -210,7 +238,11 @@ impl HeapObj {
                 format!("ExprClosure({:?}, body={:?})", param, body)
             }
             Tag::Var => format!("Var({})", self.var.as_ref().unwrap().0),
-            Tag::Neutral => format!("Neutral({}, {:?})", self.var.as_ref().unwrap().0, self.ptrs()),
+            Tag::Neutral => format!(
+                "Neutral({}, {:?})",
+                self.var.as_ref().unwrap().0,
+                self.ptrs()
+            ),
         }
     }
 }
@@ -286,14 +318,28 @@ impl Runtime {
     fn apply(&self, closure: HeapObj, arg: HeapPtr) -> HeapPtr {
         match closure.tag {
             Tag::RustClosure => {
-                let ClosureData::Rust { param, mut env, body } = closure.closure.unwrap() else { unreachable!() };
+                let ClosureData::Rust {
+                    param,
+                    mut env,
+                    body,
+                } = closure.closure.unwrap()
+                else {
+                    unreachable!()
+                };
                 let None = env.insert(param.clone(), arg) else {
                     panic!("param {:?} shadows capture", param)
                 };
                 (body)(&env, self)
             }
             Tag::ExprClosure => {
-                let ClosureData::Expr { param, mut env, body } = closure.closure.unwrap() else { unreachable!() };
+                let ClosureData::Expr {
+                    param,
+                    mut env,
+                    body,
+                } = closure.closure.unwrap()
+                else {
+                    unreachable!()
+                };
                 self.match_pattern(&param, arg, &mut env);
                 self.eval_code(body, &env)
             }
@@ -309,15 +355,13 @@ impl Runtime {
 
     /// Match a pattern against an argument, adding bindings to env.
     /// Forces tuple structure lazily (only when pattern requires it).
-    fn match_pattern(
-        &self,
-        pat: &HeapPat,
-        arg: HeapPtr,
-        env: &mut HashMap<Var, HeapPtr>,
-    ) {
+    fn match_pattern(&self, pat: &HeapPat, arg: HeapPtr, env: &mut HashMap<Var, HeapPtr>) {
         match pat {
             HeapPat::Var(name) => {
-                assert!(env.insert(name.clone(), arg).is_none(), "param shadows capture");
+                assert!(
+                    env.insert(name.clone(), arg).is_none(),
+                    "param shadows capture"
+                );
             }
             HeapPat::Tuple(pats) => {
                 // Force arg to get tuple structure
@@ -454,7 +498,14 @@ impl Runtime {
             }
             Tag::RustClosure => ptr,
             Tag::ExprClosure => {
-                let ClosureData::Expr { param, env: cenv, body } = obj.closure.unwrap() else { unreachable!() };
+                let ClosureData::Expr {
+                    param,
+                    env: cenv,
+                    body,
+                } = obj.closure.unwrap()
+                else {
+                    unreachable!()
+                };
                 assert!(cenv.is_empty(), "closure env must be empty (from to_heap)");
                 // Capture env into closure, excluding our own params
                 let params = param.vars();
@@ -509,7 +560,10 @@ impl Runtime {
                 let spine = obj.ptrs();
                 Expr::app(
                     Expr::Var(var),
-                    spine.into_iter().map(|arg| self.readback(arg, depth)).collect(),
+                    spine
+                        .into_iter()
+                        .map(|arg| self.readback(arg, depth))
+                        .collect(),
                 )
             }
             Tag::Tuple => {
