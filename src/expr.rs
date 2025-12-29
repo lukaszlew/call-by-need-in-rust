@@ -33,10 +33,17 @@ impl Pat {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FunMode {
+    Linear,
+    WithDup,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Var(Var),
     Lam {
+        mode: FunMode,
         param: Pat,
         body: Box<Expr>,
     },
@@ -80,7 +87,7 @@ impl Expr {
     pub fn free_vars(&self) -> HashSet<Var> {
         match self {
             Expr::Var(v) => HashSet::from([v.clone()]),
-            Expr::Lam { param, body } => {
+            Expr::Lam { param, body, .. } => {
                 let mut fvs = body.free_vars();
                 for v in param.vars() {
                     fvs.remove(v);
@@ -99,18 +106,29 @@ impl Expr {
         }
     }
 
-    /// Create a Lam with a variable pattern.
+    /// Create a Lam with a variable pattern (defaults to WithDup mode).
     pub fn lam(param: Var, body: Expr) -> Expr {
         Expr::Lam {
+            mode: FunMode::WithDup,
             param: Pat::Var(param),
             body: Box::new(body),
         }
     }
 
-    /// Create a Lam with a pattern.
+    /// Create a Lam with a pattern (defaults to WithDup mode).
     pub fn lam_pat(param: Pat, body: Expr) -> Expr {
         Expr::Lam {
+            mode: FunMode::WithDup,
             param,
+            body: Box::new(body),
+        }
+    }
+
+    /// Create a Lam with explicit mode and variable pattern.
+    pub fn lam_mode(mode: FunMode, param: Var, body: Expr) -> Expr {
+        Expr::Lam {
+            mode,
+            param: Pat::Var(param),
             body: Box::new(body),
         }
     }
@@ -121,12 +139,13 @@ impl Expr {
         match self {
             Expr::Var(v) if v == from => Expr::Var(to.clone()),
             Expr::Var(v) => Expr::Var(v.clone()),
-            Expr::Lam { param, body } => {
+            Expr::Lam { mode, param, body } => {
                 if param.binds(from) {
                     // from is shadowed, don't rename in body
                     self.clone()
                 } else {
                     Expr::Lam {
+                        mode: *mode,
                         param: param.clone(),
                         body: Box::new(body.rename(from, to)),
                     }
@@ -157,7 +176,7 @@ impl Expr {
                 }
                 ptr
             }
-            Expr::Lam { param, body } => {
+            Expr::Lam { param, body, .. } => {
                 let mut env = env.clone();
                 let heap_pat = param.to_heap(rt, &mut env);
                 let body_ptr = body.to_heap(rt, &env);
