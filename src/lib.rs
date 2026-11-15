@@ -4,7 +4,7 @@ use std::rc::Rc;
 // We use UnsafeCell to mutate heap objects in-place when forcing lambda evaluation.
 use std::cell::UnsafeCell;
 
-// Only the call counter in one of the examples needs Cell.
+// Only the call counters in the examples need Cell.
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -34,17 +34,26 @@ impl Value {
     }
 }
 
-// HeapObj represents unevaluated (App) or evaluated lambda calculus terms.
+// HeapObj represents unevaluated (App, Thunk) or evaluated lambda calculus terms.
 // When in heap memory, HeapObj will be in UnsafeCell and can be mutated in place when the terms are evaluated.
-// Evaluation transmutes App into Value.
+// Evaluation transmutes App and Thunk into Value.
 //
-// HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
-// HeapObj::Value(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
+// One of App and Thunk is redundant. Can you tell which?
+// App is a delayed application as data: the function and the argument.
+// Thunk is any delayed computation as code: a Rust closure without an argument. Rust has it as std::cell::LazyCell.
+// Andras Kovacs pointed out that Thunk alone is enough, and that this is how Haskell does it:
+// https://www.reddit.com/r/haskell/comments/13fuizr/callbyneed_lambda_calculus_in_rust_onefile_demo/jjxb9ut/
+// App(f, arg) is just the Thunk that forces f and calls it with arg. The test `ap_is_a_special_case_of_delay` writes it down.
+// We keep App anyway: a runtime can look inside data, but it can only run code.
+// That is why `force_with_stack` can walk a chain of Apps without the Rust stack.
+//
+// In Haskell's terms Thunk is THUNK, Closure is FUN, and App is AP, which is used mostly by GHCi's bytecode interpreter.
 // I'm not sure what the i32 representation is. Maybe CONSTR?
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 enum HeapObj {
     App(HeapPtr, HeapPtr),
+    Thunk(Code),
     Value(Value),
 }
 
@@ -92,17 +101,22 @@ impl HeapPtr {
     // - we continue forcing (the result) until we get a value,
     // - and finally we overwrite App(f, arg) in-place with the result.
     // At this point the result (i32 or closure) can be inspected.
+    // Forcing HeapObj::Thunk(code) is the same, except that the first three steps are replaced by running the code.
     fn force(&self) {
-        if let HeapObj::App(t1, t2) = self.get() {
-            t1.force();
-            // t2.force();
-            // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-            let closure: Closure = t1.expect_value().expect_closure();
-            let new_ptr: HeapPtr = closure(t2.clone());
-            new_ptr.force();
-            self.set(new_ptr.get());
-            // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
+        let new_ptr: HeapPtr = match self.get() {
+            HeapObj::App(t1, t2) => {
+                t1.force();
+                // t2.force();
+                // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
+                let closure: Closure = t1.expect_value().expect_closure();
+                closure(t2.clone())
+            }
+            HeapObj::Thunk(code) => code(),
+            HeapObj::Value(_) => return,
         };
+        new_ptr.force();
+        self.set(new_ptr.get());
+        // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
     }
 
     // The second implementation of `force`, it does the same steps in the same order.
@@ -119,10 +133,14 @@ impl HeapPtr {
                     stack.push(Frame::ApplyTo(arg));
                     ptr = f;
                 }
+                HeapObj::Thunk(code) => {
+                    stack.push(Frame::Update(ptr));
+                    ptr = code();
+                }
                 HeapObj::Value(value) => match stack.pop() {
                     Some(Frame::ApplyTo(arg)) => ptr = value.expect_closure()(arg),
                     // ptr stays on the value, which now goes to the next frame.
-                    Some(Frame::Update(app)) => app.set(HeapObj::Value(value)),
+                    Some(Frame::Update(delayed)) => delayed.set(HeapObj::Value(value)),
                     None => return,
                 },
             }
@@ -134,7 +152,7 @@ impl HeapPtr {
 enum Frame {
     // Apply it (it has to be a closure) to this unforced argument and evaluate the result.
     ApplyTo(HeapPtr),
-    // Overwrite this App in-place with it.
+    // Overwrite this App or Thunk in-place with it.
     Update(HeapPtr),
 }
 
@@ -143,6 +161,10 @@ enum Frame {
 // Because of that I was forced to Rc it as well.
 // This additional pointer jumping is probably "the biggest" inefficiency of this implementation.
 type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
+
+// Code of a Thunk is a Rust closure as well, one that takes no argument.
+// The overwrite in `force` guarantees that it runs at most once.
+type Code = Rc<dyn Fn() -> HeapPtr>;
 
 // With the lambda calculus runtime implemented, we move on to examples.
 // We start with some helpers to ease the Rust verboseness (compared to textual lambda calculus).
@@ -160,6 +182,11 @@ pub fn i32(n: i32) -> HeapPtr {
 // Allocate unevaluated lambda application.
 pub fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
     HeapPtr::new(HeapObj::App(f.clone(), arg.clone()))
+}
+
+// Allocate an unevaluated computation.
+pub fn delay(code: impl Fn() -> HeapPtr + 'static) -> HeapPtr {
+    HeapPtr::new(HeapObj::Thunk(Rc::new(code)))
 }
 // We don't have helpers for "lambda" and "var" constructs in the lambda calculus, because
 // we use Rust syntax for that. This is the so-called Higher-Order Abstract Syntax (HOAS) technique.
@@ -262,12 +289,52 @@ fn force_with_stack_goes_deep() {
     assert_eq!(force_expect_i32(&t), 5);
 }
 
+// A thunk delays any computation, not only an application. Here it is a "built-in" addition.
+#[test]
+fn delayed_addition_runs_once() {
+    let add_call_count = Rc::new(Cell::new(0));
+    let counter = add_call_count.clone();
+    // five = 2 + 3
+    let (a, b) = (i32(2), i32(3));
+    let five = delay(move || {
+        counter.set(counter.get() + 1);
+        i32(force_expect_i32(&a) + force_expect_i32(&b))
+    });
+
+    assert_eq!(add_call_count.get(), 0);
+    assert_eq!(force_expect_i32(&five), 5);
+    assert_eq!(force_expect_i32(&five), 5);
+    assert_eq!(add_call_count.get(), 1);
+}
+
+// This is how Haskell does it: a delayed application is a thunk whose code does what `force` does for App.
+#[test]
+fn ap_is_a_special_case_of_delay() {
+    fn ap_thunk(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
+        let (f, arg) = (f.clone(), arg.clone());
+        delay(move || {
+            f.force();
+            f.expect_value().expect_closure()(arg.clone())
+        })
+    }
+    // fst = \x.\y.x
+    let fst = lambda(move |x| lambda(move |_y| x.clone()));
+    // fst 5 6 == 5
+    let t = ap_thunk(&ap_thunk(&fst, &i32(5)), &i32(6));
+    assert_eq!(force_expect_i32(&t), 5);
+    // Works with the other `force` too.
+    let t = ap_thunk(&ap_thunk(&fst, &i32(5)), &i32(6));
+    t.force_with_stack();
+    assert_eq!(t.expect_value().expect_i32(), 5);
+}
+
 // So what did we learn?
 // - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
 // - The code of Rust lambdas that is passed to `lambda` is compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
 // - `lambda` allocates a closure, not a function on the heap, it is a struct containing HeapPtrs to all referenced variables.
 // - This implementation has additional indirection to closures (Rc in Closure), which Rust asks for, but probably is not needed.
 // - `ap` does not call a function but allocates an unevaluated object on the heap.
+// - That object could be a closure too, one without an argument (`delay`). Then `force` knows nothing about application.
 //
 
 // What could we do next?
