@@ -8,44 +8,21 @@ use std::cell::UnsafeCell;
 #[cfg(test)]
 use std::cell::Cell;
 
-// Value enum makes it easier to add more types to the calculus.
-// Right now we have just Closures and i32.
-// If our calculus was typed, we could use union instead of enum, since we would always know which enum case it is.
-#[derive(Clone)]
-enum Value {
-    I32(i32),
-    Closure(Closure),
-}
-
-// These are just some accessors that make the code less messy.
-impl Value {
-    fn expect_i32(self: Value) -> i32 {
-        if let Value::I32(i) = self {
-            return i;
-        }
-        panic!("Not i32.")
-    }
-
-    fn expect_closure(self: Value) -> Closure {
-        if let Value::Closure(c) = self {
-            return c;
-        }
-        panic!("Not a closure.")
-    }
-}
-
-// HeapObj represents unevaluated (App) or evaluated lambda calculus terms.
+// HeapObj represents unevaluated (App) or evaluated (I32, Closure) lambda calculus terms.
 // When in heap memory, HeapObj will be in UnsafeCell and can be mutated in place when the terms are evaluated.
-// Evaluation transmutes App into Value.
+// Evaluation transmutes App into one of the two values.
+// To add more types to the calculus, add more value cases. Right now we have just Closures and i32.
+// If our calculus was typed, the tag would only need to tell App from a value, since we would always know which value it is.
 //
 // HeapObj::App tag corresponds to PAP and AP Haskell heap objects tags.
-// HeapObj::Value(Value::Closure) tag corresponds to FUN and THUNK Haskell heap object tags.
+// HeapObj::Closure tag corresponds to FUN and THUNK Haskell heap object tags.
 // I'm not sure what the i32 representation is. Maybe CONSTR?
 // https://gitlab.haskell.org/ghc/ghc/-/wikis/commentary/rts/storage/heap-objects
 #[derive(Clone)]
 enum HeapObj {
     App(HeapPtr, HeapPtr),
-    Value(Value),
+    I32(i32),
+    Closure(Closure),
 }
 
 // HeapObj is to be allocated on our "heap" and the memory is managed through reference counting.
@@ -64,12 +41,19 @@ impl HeapPtr {
         }
     }
 
-    // Another helper.
-    fn expect_value(&self) -> Value {
-        match self.get() {
-            HeapObj::Value(v) => v.clone(),
-            _ => panic!("Not a value."),
-        }
+    // These are just some accessors that make the code less messy.
+    fn expect_i32(&self) -> i32 {
+        let HeapObj::I32(i) = self.get() else {
+            panic!("Not i32.")
+        };
+        i
+    }
+
+    fn expect_closure(&self) -> Closure {
+        let HeapObj::Closure(c) = self.get() else {
+            panic!("Not a closure.")
+        };
+        c
     }
 
     // Accessing the HeapObj self is pointing to. It is safe because we return cloned Rc.
@@ -85,7 +69,7 @@ impl HeapPtr {
     }
 
     // This function implements the core of lazy call-by-need evaluation.
-    // If HeapObj::Value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
+    // If a value is forced, nothing happens, but when HeapObj::App(f, arg) is forced:
     // - we force f first,
     // - we assume that f is now a Closure, (i32 would be a 'type' error),
     // - we apply the closure to the (unforced) argument,
@@ -97,7 +81,7 @@ impl HeapPtr {
             t1.force();
             // t2.force();
             // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-            let closure: Closure = t1.expect_value().expect_closure();
+            let closure: Closure = t1.expect_closure();
             let new_ptr: HeapPtr = closure(t2.clone());
             new_ptr.force();
             self.set(new_ptr.get());
@@ -117,12 +101,12 @@ type Closure = Rc<dyn Fn(HeapPtr) -> HeapPtr>;
 
 // Create HeapPtr for the given Rust closure.
 pub fn lambda(f: impl Fn(HeapPtr) -> HeapPtr + 'static) -> HeapPtr {
-    HeapPtr::new(HeapObj::Value(Value::Closure(Rc::new(f))))
+    HeapPtr::new(HeapObj::Closure(Rc::new(f)))
 }
 
 // Create HeapPtr for i32. We only have boxed integers.
 pub fn i32(n: i32) -> HeapPtr {
-    HeapPtr::new(HeapObj::Value(Value::I32(n)))
+    HeapPtr::new(HeapObj::I32(n))
 }
 
 // Allocate unevaluated lambda application.
@@ -135,7 +119,7 @@ pub fn ap(f: &HeapPtr, arg: &HeapPtr) -> HeapPtr {
 // Since most our examples or tests should evaluate to i32, this helper reduces the verboseness as well.
 pub fn force_expect_i32(ptr: &HeapPtr) -> i32 {
     ptr.force();
-    ptr.expect_value().expect_i32()
+    ptr.expect_i32()
 }
 
 // Simplest application.
@@ -225,7 +209,7 @@ fn applying_i32_is_a_type_error() {
 // What could we do next?
 // - Why do we need dyn/Rc in Closure? Isn't Box enough? How to avoid double pointer chasing?
 //   Relevant: https://github.com/rust-lang/rust/issues/24000#issuecomment-479425396
-// - How to change enum Value to union Value? Rc is in the way. ManualDrop?
+// - How to keep I32 and Closure in an untagged union? Rc is in the way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesize the code for the lambdas, including the awkward clones.
 // - Runtime `force` has two recursive calls, so Rust stack is a part of the runtime.
 // - Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
