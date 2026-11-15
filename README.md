@@ -6,4 +6,4 @@ The implementation turned out to be pretty compact (say 100-200 LOC).
 I also added some comments for your enjoyment.
 This is a one-file implementation with examples.
 
-All resides in [src/main.rs](https://github.com/lukaszlew/call-by-need-in-rust/blob/main/src/main.rs).
+All resides in [src/lib.rs](https://github.com/lukaszlew/call-by-need-in-rust/blob/main/src/lib.rs).
