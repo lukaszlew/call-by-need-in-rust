@@ -92,18 +92,40 @@ impl HeapPtr {
     // - we continue forcing (the result) until we get a value,
     // - and finally we overwrite App(f, arg) in-place with the result.
     // At this point the result (i32 or closure) can be inspected.
+    //
+    // "First", "continue" and "finally" need a stack. We keep our own instead of recursing on the Rust one,
+    // so the depth of evaluation is limited by the heap. This is the stack of Haskell's STG machine.
     fn force(&self) {
-        if let HeapObj::App(t1, t2) = self.get() {
-            t1.force();
-            // t2.force();
-            // Forcing the argument would effectively implement call by value, but there are better implementations of CBV.
-            let closure: Closure = t1.expect_value().expect_closure();
-            let new_ptr: HeapPtr = closure(t2.clone());
-            new_ptr.force();
-            self.set(new_ptr.get());
-            // Replacing the overwrite (last line) with force returning new_ptr.get(), would result in call-by-name.
-        };
+        let mut stack: Vec<Frame> = Vec::new();
+        // The object we are evaluating right now.
+        let mut ptr: HeapPtr = self.clone();
+        loop {
+            match ptr.get() {
+                HeapObj::App(f, arg) => {
+                    // Skipping the Update frame would result in call-by-name.
+                    stack.push(Frame::Update(ptr));
+                    // Forcing arg before the application would effectively implement call by value,
+                    // but there are better implementations of CBV.
+                    stack.push(Frame::ApplyTo(arg));
+                    ptr = f;
+                }
+                HeapObj::Value(value) => match stack.pop() {
+                    Some(Frame::ApplyTo(arg)) => ptr = value.expect_closure()(arg),
+                    // ptr stays on the value, which now goes to the next frame.
+                    Some(Frame::Update(app)) => app.set(HeapObj::Value(value)),
+                    None => return,
+                },
+            }
+        }
     }
+}
+
+// Frame says what to do with a value once `force` gets one.
+enum Frame {
+    // Apply it (it has to be a closure) to this unforced argument and evaluate the result.
+    ApplyTo(HeapPtr),
+    // Overwrite this App in-place with it.
+    Update(HeapPtr),
 }
 
 // Finally we learn that Closure is an ordinary Rust closure.
@@ -214,6 +236,19 @@ fn applying_i32_is_a_type_error() {
     force_expect_i32(&ap(&i32(5), &i32(6)));
 }
 
+// `force` keeps its own stack on the heap, so a long chain of delayed applications does not overflow the Rust stack.
+#[test]
+fn deep_application_chain_does_not_overflow_the_stack() {
+    // id = \x.x
+    let id = lambda(|x| x);
+    // id (id (... (id 5)))
+    let mut t = i32(5);
+    for _ in 0..1_000_000 {
+        t = ap(&id, &t);
+    }
+    assert_eq!(force_expect_i32(&t), 5);
+}
+
 // So what did we learn?
 // - (I believe that) Haskell's lambda-lifting (supercombinator synthesis) is very close to Rust's closure forming.
 // - The code of Rust lambdas that is passed to `lambda` is compiled by Rust. This is similar to what Haskell's G-machine is doing to super-combinators.
@@ -227,7 +262,7 @@ fn applying_i32_is_a_type_error() {
 //   Relevant: https://github.com/rust-lang/rust/issues/24000#issuecomment-479425396
 // - How to change enum Value to union Value? Rc is in the way. ManualDrop?
 // - We are verbose. How to write a macro that would synthesize the code for the lambdas, including the awkward clones.
-// - Runtime `force` has two recursive calls, so Rust stack is a part of the runtime.
+// - `force` does not recurse, but a Rust closure that forces its argument (like `inc`) still does, so Rust stack is a part of the runtime.
 // - Simplest GC is not hard in itself and would be cool to see it. But it would need explicit access to closure captured variables, wouldn't it?
 // - Can we turn `force` calls into tail calls (jmp)? It would be nice to be closer to Haskell "jmp continuations".
 // - Would be very cool to have some runtime benchmarks and maybe compute number of allocations.
